@@ -1,4 +1,4 @@
-# OpenMVCI (MVCI32 Reimplementation)
+# OpenMVCI
 
 OpenMVCI is a cross-platform C++17 open source reimplementation of the Toyota Techstream-facing MVCI/J2534 API.
 It includes a libusb backend and a practical command-line DTC reader you can use for day-to-day diagnostics.
