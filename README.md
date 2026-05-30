@@ -3,11 +3,11 @@
 OpenMVCI is a cross-platform C++17 open source reimplementation of the Toyota Techstream-facing MVCI/J2534 API.
 It includes a libusb backend and a practical command-line DTC reader you can use for day-to-day diagnostics.
 
-Build outputs by platform:
+Build outputs by platform (drop-in compatible exports):
 
-- Windows: `openmvci.dll` (drop-in compatible exports, non-infringing filename)
-- macOS: `libMVCI32.dylib`
-- Linux: `libMVCI32.so`
+- Windows: `openmvci.dll`
+- macOS: `libopenmvci.dylib`
+- Linux: `libopenmvci.so`
 
 ## Features
 
@@ -118,8 +118,8 @@ build/dtc_reader --monitor --interval 1000 --verbose
 ### As a subdirectory
 
 ```cmake
-add_subdirectory(external/mvci32_min)
-target_link_libraries(your_target PRIVATE mvci32)
+add_subdirectory(external/openmvci)
+target_link_libraries(your_target PRIVATE openmvci)
 ```
 
 ### As an installed package
@@ -131,13 +131,13 @@ cmake --install build --prefix /your/prefix
 ```
 
 ```cmake
-find_package(mvci32 CONFIG REQUIRED)
-target_link_libraries(your_target PRIVATE MVCI32::mvci32)
+find_package(openmvci CONFIG REQUIRED)
+target_link_libraries(your_target PRIVATE OpenMVCI::openmvci)
 ```
 
 ## Drop-In Replacement Notes
 
-- ABI exports are designed to match common MVCI32/J2534 entry points used by Techstream-like consumers.
+- ABI exports are designed to match common Techstream-style J2534 entry points used by downstream consumers.
 - If you extend the library, keep exported names and calling conventions unchanged to preserve compatibility.
 - On Windows, deploy `openmvci.dll` and map or rename it according to your integration strategy.
 - For unsupported vendor-specific behavior, extend the backend in `src/platform/usb_vci.cpp` and `src/driver.cpp`.
