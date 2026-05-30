@@ -1,0 +1,19 @@
+/build/
+/out/
+/cmake-build-*/
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.idb
+.DS_Store
+.idea/
+.vscode/
+
+# macOS
+.DS_Store
