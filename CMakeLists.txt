@@ -21,6 +21,7 @@ add_library(openmvci
   src/uds.cpp
   src/platform/usb_vci.cpp
   src/platform/loopback_transport.cpp
+  src/platform/serial_transport.cpp
 )
 
 if(APPLE)
@@ -61,16 +62,24 @@ if(MVCI_BUILD_TESTS)
   add_executable(openmvci_smoke tests/smoke.cpp)
   add_executable(openmvci_unit_api tests/unit_api.cpp)
   add_executable(openmvci_unit_uds tests/unit_uds.cpp)
+  add_executable(openmvci_unit_frame_resync tests/unit_frame_resync.cpp)
   target_link_libraries(openmvci_smoke PRIVATE openmvci Threads::Threads)
   target_link_libraries(openmvci_unit_api PRIVATE openmvci Threads::Threads)
   target_link_libraries(openmvci_unit_uds PRIVATE openmvci Threads::Threads)
+  target_link_libraries(openmvci_unit_frame_resync PRIVATE openmvci Threads::Threads)
   add_test(NAME openmvci_smoke COMMAND openmvci_smoke)
   add_test(NAME openmvci_unit_api COMMAND openmvci_unit_api)
   add_test(NAME openmvci_unit_uds COMMAND openmvci_unit_uds)
+  add_test(NAME openmvci_unit_frame_resync COMMAND openmvci_unit_frame_resync)
 endif()
 
 add_executable(dtc_reader tools/dtc_reader.cpp)
 target_link_libraries(dtc_reader PRIVATE openmvci Threads::Threads)
+
+if(APPLE)
+  add_executable(mvci_probe tools/mvci_probe.cpp)
+  target_link_libraries(mvci_probe PRIVATE Threads::Threads)
+endif()
 
 if(MVCI_BUILD_EXAMPLES)
   add_executable(read_dtcs examples/read_dtcs.cpp)

@@ -14,6 +14,9 @@ Build outputs by platform (drop-in compatible exports):
 - J2534-style exports, plus MVCI-compatible aliases
 - Shared-library focused build (`BUILD_SHARED_LIBS=ON` is recommended)
 - libusb backend with known Toyota/Mini-VCI VID/PID matching and keyword fallback discovery
+- Mini-VCI bootstrap handshake support for FTDI-class adapters (`0403:6001`, `0403:6010`)
+- Resilient packet resynchronization that skips Mini-VCI status chatter before J2534 frame decode
+- Serial-first dispatch fallback for Mini-VCI on macOS and Linux when raw USB is unavailable
 - CLI tool for reading, clearing, and monitoring DTCs
 - CMake integration via both `add_subdirectory()` and `find_package()`
 - Smoke and unit test coverage
@@ -98,12 +101,13 @@ ctest --test-dir build -C Release --output-on-failure
 
 Additional options include:
 
-- `--device <selector>`: `loopback` or `vid:pid[:serial]`
+- `--device <selector>`: `loopback`, `vid:pid[:serial]`, `serial:/dev/...`, or `/dev/...`
 - `--baud <n>`
 - `--timeout <ms>`
 - `--interval <ms>`
 - `--mask <status-mask>`
 - `--verbose`
+- `--no-vin` (skip VIN retrieval before reading DTCs)
 
 Examples:
 
@@ -111,7 +115,32 @@ Examples:
 build/dtc_reader --read --device 0403:6001
 build/dtc_reader --clear --device 0403:6001
 build/dtc_reader --monitor --interval 1000 --verbose
+build/dtc_reader --read --device serial:/dev/cu.usbserial-FTXYZ123
 ```
+
+By default, read and monitor modes also attempt VIN retrieval over UDS `0x22 F1 90` and then fall back to OBD Mode 09 PID 02 when needed, printing the decoded VIN before DTC output.
+
+The `read_dtcs` example now defaults to automatic real-device discovery (same behavior as `dtc_reader`).
+Use `./read_dtcs loopback` only for simulated transport testing.
+
+On macOS, automatic serial discovery probes both `/dev/tty.usb*` and `/dev/cu.usb*` nodes.
+
+### Mini-VCI runtime toggles
+
+- `MVCI_MINIVCI_BOOTSTRAP=0` disables the Mini-VCI startup handshake (enabled by default).
+- `MVCI_MINIVCI_BOOTSTRAP_STRICT=1` rejects adapters that fail bootstrap (disabled by default).
+- `MVCI_MINIVCI_STAGE1_STRICT=1` requires explicit stage-1 ACK (`01 60`), otherwise stage-1 timeout is tolerated.
+- `MVCI_VERBOSE_USB=1` enables verbose USB transport logs.
+- `MVCI_VERBOSE_SERIAL=1` enables verbose serial transport logs.
+- `MVCI_SERIAL_BAUD=<rate>` overrides the initial serial baud rate (default `500000`).
+- `MVCI_SERIAL_ASSERT_CTRL=0` disables asserting `DTR/RTS` on open (enabled by default).
+- `MVCI_SERIAL_RTSCTS=1` enables hardware flow control (`RTS/CTS`) for adapters that require it.
+- `MVCI_SERIAL_REQUIRE_RX=1` rejects serial nodes that emit no RX bytes shortly after open.
+- `MVCI_SERIAL_REQUIRE_RX_TIMEOUT_MS=<ms>` tunes the RX-observation window (default `250`).
+
+With `MVCI_VERBOSE_SERIAL=1`, serial transport logs now include hex dumps for TX/RX chunks.
+
+When bootstrap is enabled, the serial transport will probe additional common Mini-VCI baud rates (`230400`, `115200`, `38400`) if bootstrap does not respond at the initial configured rate.
 
 ## Integration
 

@@ -21,6 +21,7 @@ struct Options {
   bool monitor{false};
   bool verbose{false};
   bool help{false};
+  bool fetchVin{true};
 };
 
 bool parseUint(const std::string& text, std::uint32_t& value) {
@@ -33,7 +34,7 @@ bool parseUint(const std::string& text, std::uint32_t& value) {
 }
 
 void printUsage() {
-  std::cout << "Usage: dtc_reader [--device NAME] [--baud N] [--timeout MS] [--mask N] [--interval MS] [--read] [--clear] [--monitor] [--verbose]\n";
+  std::cout << "Usage: dtc_reader [--device NAME] [--baud N] [--timeout MS] [--mask N] [--interval MS] [--read] [--clear] [--monitor] [--verbose] [--no-vin]\n";
 }
 
 void printFrame(const char* label, const std::vector<std::uint8_t>& frame) {
@@ -66,6 +67,10 @@ bool parseArgs(int argc, char** argv, Options& options) {
     }
     if (arg == "--verbose" || arg == "-v") {
       options.verbose = true;
+      continue;
+    }
+    if (arg == "--no-vin") {
+      options.fetchVin = false;
       continue;
     }
     if (index + 1 >= argc) {
@@ -139,6 +144,30 @@ mvci::Status runReadCycle(mvci::ChannelHandle channelId,
   }
 
   return mvci::parseActiveDtcResponses(responses, dtcs, options.statusMask);
+}
+
+mvci::Status runVinReadCycle(mvci::ChannelHandle channelId,
+                             const Options& options,
+                             std::string& vin) {
+  std::vector<std::vector<std::uint8_t>> responses;
+  const auto request = mvci::buildReadVinRequest();
+
+  if (options.verbose) {
+    printFrame("TX VIN: ", request);
+  }
+
+  const auto status = mvci::sendUdsRequest(channelId, request, responses, options.timeoutMs);
+  if (status != mvci::STATUS_NOERROR) {
+    return status;
+  }
+
+  if (options.verbose) {
+    for (const auto& response : responses) {
+      printFrame("RX VIN: ", response);
+    }
+  }
+
+  return mvci::parseVinResponses(responses, vin);
 }
 
 mvci::Status runClearCycle(mvci::ChannelHandle channelId, const Options& options) {
@@ -225,6 +254,16 @@ int main(int argc, char** argv) {
   }
 
   do {
+    if (options.fetchVin) {
+      std::string vin;
+      const auto vinStatus = runVinReadCycle(channelId, options, vin);
+      if (vinStatus == mvci::STATUS_NOERROR) {
+        std::cout << "VIN: " << vin << '\n';
+      } else {
+        std::cout << "VIN unavailable: " << mvci::statusToString(vinStatus) << '\n';
+      }
+    }
+
     std::vector<mvci::DtcRecord> dtcs;
     status = runReadCycle(channelId, options, dtcs);
     if (status != mvci::STATUS_NOERROR) {

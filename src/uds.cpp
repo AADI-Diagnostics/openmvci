@@ -1,8 +1,10 @@
 #include "mvci/uds.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <iomanip>
+#include <map>
 #include <sstream>
 
 namespace mvci {
@@ -36,6 +38,14 @@ std::vector<std::uint8_t> buildReadDtcRequest(std::uint8_t statusMask) {
 
 std::vector<std::uint8_t> buildClearDtcRequest() {
   return {0x14U, 0xFFU, 0xFFU, 0xFFU};
+}
+
+std::vector<std::uint8_t> buildReadVinRequest() {
+  return {0x22U, 0xF1U, 0x90U};
+}
+
+std::vector<std::uint8_t> buildReadVinOBDRequest() {
+  return {0x09U, 0x02U};
 }
 
 Status sendUdsRequest(ChannelHandle channelId,
@@ -120,6 +130,100 @@ Status readActiveDtcs(ChannelHandle channelId,
   }
 
   return parseActiveDtcResponses(responses, dtcs, statusMask);
+}
+
+Status parseVinResponses(const std::vector<std::vector<std::uint8_t>>& responses,
+                         std::string& vin) {
+  vin.clear();
+
+  for (const auto& response : responses) {
+    if (response.size() < 4) {
+      continue;
+    }
+
+    if (response[0] == 0x7FU) {
+      return ERR_FAILED;
+    }
+
+    if (response[0] != 0x62U || response[1] != 0xF1U || response[2] != 0x90U) {
+      continue;
+    }
+
+    for (std::size_t i = 3; i < response.size(); ++i) {
+      const auto c = static_cast<char>(response[i]);
+      if (std::isprint(static_cast<unsigned char>(c)) != 0 && c != '\0') {
+        vin.push_back(c);
+      }
+    }
+    break;
+  }
+
+  return vin.empty() ? ERR_FAILED : STATUS_NOERROR;
+}
+
+Status parseOBDVinResponses(const std::vector<std::vector<std::uint8_t>>& responses,
+                            std::string& vin) {
+  vin.clear();
+  std::map<std::uint8_t, std::string> orderedFrames;
+
+  for (const auto& response : responses) {
+    if (response.size() < 4) {
+      continue;
+    }
+
+    if (response[0] == 0x7FU) {
+      return ERR_FAILED;
+    }
+
+    if (response[0] != 0x49U || response[1] != 0x02U) {
+      continue;
+    }
+
+    const std::uint8_t frameIndex = response[2];
+    std::string frameData;
+    for (std::size_t i = 3; i < response.size(); ++i) {
+      const auto c = static_cast<char>(response[i]);
+      if (std::isprint(static_cast<unsigned char>(c)) != 0 && c != '\0') {
+        frameData.push_back(c);
+      }
+    }
+
+    if (!frameData.empty()) {
+      orderedFrames[frameIndex] = std::move(frameData);
+    }
+  }
+
+  for (const auto& [_, part] : orderedFrames) {
+    vin += part;
+  }
+
+  if (vin.size() > 17) {
+    vin.resize(17);
+  }
+  return vin.empty() ? ERR_FAILED : STATUS_NOERROR;
+}
+
+Status readVehicleVin(ChannelHandle channelId,
+                      std::string& vin,
+                      std::uint32_t timeoutMs) {
+  const auto udsRequest = buildReadVinRequest();
+  std::vector<std::vector<std::uint8_t>> responses;
+  auto status = sendUdsRequest(channelId, udsRequest, responses, timeoutMs);
+  if (status == STATUS_NOERROR) {
+    status = parseVinResponses(responses, vin);
+    if (status == STATUS_NOERROR) {
+      return STATUS_NOERROR;
+    }
+  }
+
+  const auto obdRequest = buildReadVinOBDRequest();
+  responses.clear();
+  status = sendUdsRequest(channelId, obdRequest, responses, timeoutMs);
+  if (status != STATUS_NOERROR) {
+    return status;
+  }
+
+  return parseOBDVinResponses(responses, vin);
 }
 
 Status clearDtcs(ChannelHandle channelId, std::uint32_t timeoutMs) {

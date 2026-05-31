@@ -1,8 +1,12 @@
 #include "mvci/platform/usb_vci.hpp"
 
+#include "mvci/platform/frame_resync.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <initializer_list>
 #include <string_view>
@@ -14,10 +18,36 @@ namespace {
 
 constexpr std::uint16_t kDefaultVid = 0x0403U;
 constexpr std::uint16_t kDefaultPid = 0x6001U;
+constexpr std::uint16_t kFtdiVid = 0x0403U;
 constexpr std::uint32_t kUsbTimeoutMs = 1000U;
 constexpr std::string_view kKeywordMvcI = "mvci";
 constexpr std::string_view kKeywordToyota = "toyota";
 constexpr std::string_view kKeywordTechstream = "techstream";
+
+bool verboseUsbEnabled() {
+  static const bool enabled = []() {
+    const char* value = std::getenv("MVCI_VERBOSE_USB");
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
+  }();
+  return enabled;
+}
+
+template <typename... Args>
+void usbLog(const char* fmt, Args... args) {
+  if (!verboseUsbEnabled()) {
+    return;
+  }
+  std::fprintf(stderr, "[mvci usb] ");
+  std::fprintf(stderr, fmt, args...);
+  std::fprintf(stderr, "\n");
+}
+
+void usbLogPlain(const char* msg) {
+  if (!verboseUsbEnabled()) {
+    return;
+  }
+  std::fprintf(stderr, "[mvci usb] %s\n", msg);
+}
 
 struct VidPid {
   std::uint16_t vid;
@@ -47,6 +77,50 @@ bool containsKeyword(const std::string& text) {
 
 std::uint16_t parseHex16(const std::string& text) {
   return static_cast<std::uint16_t>(std::stoul(text, nullptr, 16));
+}
+
+bool isMiniVciCandidate(std::uint16_t vid, std::uint16_t pid) {
+  if (vid != 0x0403U) {
+    return false;
+  }
+  return pid == 0x6001U || pid == 0x6010U;
+}
+
+bool miniBootstrapStrictEnabled() {
+  static const bool enabled = []() {
+    const char* value = std::getenv("MVCI_MINIVCI_BOOTSTRAP_STRICT");
+    if (!value || value[0] == '\0') {
+      return false;
+    }
+    return value[0] != '0';
+  }();
+  return enabled;
+}
+
+std::uint32_t nowMs() {
+  return static_cast<std::uint32_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
+
+std::string hexString(const std::vector<std::uint8_t>& bytes) {
+  static constexpr char kHex[] = "0123456789abcdef";
+  std::string out;
+  out.reserve(bytes.size() * 2U);
+  for (const auto b : bytes) {
+    out.push_back(kHex[(b >> 4U) & 0x0FU]);
+    out.push_back(kHex[b & 0x0FU]);
+  }
+  return out;
+}
+
+bool containsSequence(const std::vector<std::uint8_t>& haystack,
+                      const std::vector<std::uint8_t>& needle) {
+  if (needle.empty() || haystack.size() < needle.size()) {
+    return false;
+  }
+  return std::search(haystack.begin(), haystack.end(), needle.begin(), needle.end()) != haystack.end();
 }
 
 } // namespace
@@ -91,6 +165,17 @@ bool UsbVciInterface::parseDeviceString(const std::string& deviceName,
   }
 }
 
+bool UsbVciInterface::miniBootstrapEnabled() {
+  static const bool enabled = []() {
+    const char* value = std::getenv("MVCI_MINIVCI_BOOTSTRAP");
+    if (!value || value[0] == '\0') {
+      return true;
+    }
+    return value[0] != '0';
+  }();
+  return enabled;
+}
+
 Status UsbVciInterface::open(const std::string& deviceName) {
   close();
 
@@ -109,6 +194,7 @@ Status UsbVciInterface::openLoopback() {
 
 Status UsbVciInterface::openUsb(const std::string& deviceName) {
   if (libusb_init(&context_) != LIBUSB_SUCCESS) {
+    usbLogPlain("libusb_init failed");
     return ERR_FAILED;
   }
 
@@ -118,9 +204,12 @@ Status UsbVciInterface::openUsb(const std::string& deviceName) {
   std::uint16_t pid = kDefaultPid;
   std::string serial;
   const bool explicitMatch = parseDeviceString(deviceName, vid, pid, serial);
+  usbLog("openUsb selector='%s' explicit=%d target=%04x:%04x serial='%s'",
+         deviceName.c_str(), explicitMatch ? 1 : 0, vid, pid, serial.c_str());
 
   if (explicitMatch) {
     const auto status = discoverDevice(vid, pid, serial);
+    usbLog("discoverDevice(explicit %04x:%04x) -> %d", vid, pid, static_cast<int>(status));
     if (status == STATUS_NOERROR) {
       return claimInterface();
     }
@@ -129,6 +218,7 @@ Status UsbVciInterface::openUsb(const std::string& deviceName) {
   }
 
   const auto exactStatus = discoverDevice(vid, pid, serial);
+  usbLog("discoverDevice(default %04x:%04x) -> %d", vid, pid, static_cast<int>(exactStatus));
   if (exactStatus == STATUS_NOERROR) {
     return claimInterface();
   }
@@ -139,12 +229,15 @@ Status UsbVciInterface::openUsb(const std::string& deviceName) {
     }
 
     const auto knownStatus = discoverDevice(candidate.vid, candidate.pid, serial);
+    usbLog("discoverDevice(known %04x:%04x) -> %d", candidate.vid, candidate.pid,
+           static_cast<int>(knownStatus));
     if (knownStatus == STATUS_NOERROR) {
       return claimInterface();
     }
   }
 
   const auto scanStatus = discoverAnyMatchingDevice();
+  usbLog("discoverAnyMatchingDevice -> %d", static_cast<int>(scanStatus));
   if (scanStatus != STATUS_NOERROR) {
     close();
     return scanStatus;
@@ -187,6 +280,8 @@ Status UsbVciInterface::discoverDevice(std::uint16_t vid, std::uint16_t pid, con
     }
 
     handle_ = candidateHandle;
+    detectedVid_ = descriptor.idVendor;
+    detectedPid_ = descriptor.idProduct;
     result = findEndpoints();
     if (result == STATUS_NOERROR) {
       break;
@@ -239,6 +334,8 @@ Status UsbVciInterface::discoverAnyMatchingDevice() {
     }
 
     handle_ = candidateHandle;
+    detectedVid_ = descriptor.idVendor;
+    detectedPid_ = descriptor.idProduct;
     result = findEndpoints();
     if (result == STATUS_NOERROR) {
       break;
@@ -308,8 +405,38 @@ Status UsbVciInterface::claimInterface() {
     return ERR_FAILED;
   }
 
-  if (libusb_kernel_driver_active(handle_, endpoints_.interfaceNumber) == 1) {
-    libusb_detach_kernel_driver(handle_, endpoints_.interfaceNumber);
+  const int kernelActive = libusb_kernel_driver_active(handle_, endpoints_.interfaceNumber);
+  if (kernelActive == 1) {
+    const int detachResult = libusb_detach_kernel_driver(handle_, endpoints_.interfaceNumber);
+    usbLog("kernel driver active on interface %u, detach result=%d (%s)",
+           endpoints_.interfaceNumber, detachResult,
+           detachResult == LIBUSB_SUCCESS ? "ok" : libusb_error_name(detachResult));
+
+    if (detachResult != LIBUSB_SUCCESS) {
+      libusb_device* device = libusb_get_device(handle_);
+      libusb_device_descriptor descriptor{};
+      const bool isFtdi = device && libusb_get_device_descriptor(device, &descriptor) == LIBUSB_SUCCESS &&
+                          descriptor.idVendor == kFtdiVid;
+#if defined(__APPLE__)
+      if (isFtdi) {
+        std::fprintf(stderr,
+                     "[mvci usb] FTDI adapter %04x:%04x is owned by Apple's AppleUSBFTDI DriverKit extension and cannot be detached (%s).\n"
+                     "[mvci usb] On modern macOS (Big Sur+, Apple Silicon), this dext is Apple-signed and cannot be unloaded on a stock system.\n"
+                     "[mvci usb] The adapter is exposed as a serial node instead, typically /dev/cu.usbserial-<SERIAL>.\n"
+                     "[mvci usb] Use the serial transport (see docs) rather than the raw USB path for FTDI-based VCIs on macOS.\n",
+                     descriptor.idVendor, descriptor.idProduct,
+                     libusb_error_name(detachResult));
+      } else
+#else
+      (void)isFtdi;
+#endif
+      {
+        std::fprintf(stderr,
+                     "[mvci usb] Kernel driver holds the adapter and cannot be detached (%s).\n",
+                     libusb_error_name(detachResult));
+      }
+      return ERR_FAILED;
+    }
   }
 
   if (libusb_set_auto_detach_kernel_driver(handle_, 1) != LIBUSB_SUCCESS) {
@@ -320,7 +447,26 @@ Status UsbVciInterface::claimInterface() {
     activeConfiguration_ = 1;
   }
 
-  if (libusb_claim_interface(handle_, endpoints_.interfaceNumber) != LIBUSB_SUCCESS) {
+  const int claimResult = libusb_claim_interface(handle_, endpoints_.interfaceNumber);
+  if (claimResult != LIBUSB_SUCCESS) {
+    usbLog("libusb_claim_interface failed on interface %u: %s",
+           endpoints_.interfaceNumber, libusb_error_name(claimResult));
+
+    libusb_device* device = libusb_get_device(handle_);
+    libusb_device_descriptor descriptor{};
+    const bool isFtdi = device && libusb_get_device_descriptor(device, &descriptor) == LIBUSB_SUCCESS &&
+                        descriptor.idVendor == kFtdiVid;
+#if defined(__APPLE__)
+    if (isFtdi && claimResult == LIBUSB_ERROR_ACCESS) {
+      std::fprintf(stderr,
+                   "[mvci usb] FTDI adapter detected but the macOS AppleUSBFTDI driver is holding it.\n"
+                   "[mvci usb] Unload it once per boot with:\n"
+                   "[mvci usb]   sudo kextunload -b com.apple.driver.AppleUSBFTDI\n"
+                   "[mvci usb] (On SIP-enabled systems, also: sudo kextunload -b com.apple.driver.AppleUSBFTDI -v)\n");
+    }
+#else
+    (void)isFtdi;
+#endif
     return ERR_FAILED;
   }
 
@@ -329,7 +475,146 @@ Status UsbVciInterface::claimInterface() {
   }
 
   (void)flushInput();
+
+  miniVciMode_ = isMiniVciCandidate(detectedVid_, detectedPid_);
+  miniVciReady_ = !miniVciMode_;
+  if (miniVciMode_ && miniBootstrapEnabled()) {
+    const auto initStatus = initializeMiniVci();
+    if (initStatus != STATUS_NOERROR) {
+      miniVciReady_ = false;
+      if (miniBootstrapStrictEnabled()) {
+        usbLogPlain("Mini-VCI bootstrap failed; rejecting adapter in strict mode");
+        return ERR_FAILED;
+      }
+      usbLogPlain("Mini-VCI bootstrap did not complete; continuing in non-bootstrapped mode");
+    }
+  }
+
   return STATUS_NOERROR;
+}
+
+Status UsbVciInterface::writeRaw(const std::vector<std::uint8_t>& bytes) {
+  if (!handle_ || endpoints_.out == 0) {
+    return ERR_NOT_INITIALIZED;
+  }
+
+  int transferred = 0;
+  const auto status = libusb_bulk_transfer(handle_, endpoints_.out,
+                                           const_cast<unsigned char*>(bytes.data()),
+                                           static_cast<int>(bytes.size()),
+                                           &transferred,
+                                           static_cast<unsigned int>(kUsbTimeoutMs));
+  if (status == LIBUSB_ERROR_PIPE) {
+    (void)recoverEndpoint(endpoints_.out);
+    return ERR_FAILED;
+  }
+  if (status == LIBUSB_ERROR_NO_DEVICE) {
+    return ERR_FAILED;
+  }
+  if (status != LIBUSB_SUCCESS || transferred != static_cast<int>(bytes.size())) {
+    return ERR_FAILED;
+  }
+  return STATUS_NOERROR;
+}
+
+Status UsbVciInterface::readRaw(std::vector<std::uint8_t>& bytes, std::uint32_t timeoutMs) {
+  bytes.clear();
+  if (!handle_ || endpoints_.in == 0) {
+    return ERR_NOT_INITIALIZED;
+  }
+
+  unsigned char buffer[512]{};
+  int transferred = 0;
+  const auto status = libusb_bulk_transfer(handle_, endpoints_.in, buffer, sizeof(buffer), &transferred, timeoutMs);
+  if (status == LIBUSB_ERROR_TIMEOUT) {
+    return ERR_TIMEOUT;
+  }
+  if (status == LIBUSB_ERROR_PIPE) {
+    (void)recoverEndpoint(endpoints_.in);
+    return ERR_FAILED;
+  }
+  if (status == LIBUSB_ERROR_NO_DEVICE || status != LIBUSB_SUCCESS) {
+    return ERR_FAILED;
+  }
+  if (transferred <= 0) {
+    return ERR_TIMEOUT;
+  }
+
+  bytes.assign(buffer, buffer + transferred);
+  return STATUS_NOERROR;
+}
+
+bool UsbVciInterface::waitForMiniReply(const std::vector<std::vector<std::uint8_t>>& acceptedReplies,
+                                       std::uint32_t timeoutMs) {
+  const auto start = nowMs();
+  std::vector<std::uint8_t> stream;
+  while (nowMs() - start < timeoutMs) {
+    std::vector<std::uint8_t> incoming;
+    const auto status = readRaw(incoming, 50);
+    if (status == ERR_TIMEOUT) {
+      continue;
+    }
+    if (status != STATUS_NOERROR) {
+      return false;
+    }
+
+    stream.insert(stream.end(), incoming.begin(), incoming.end());
+    if (stream.size() > 4096U) {
+      stream.erase(stream.begin(), stream.end() - 1024);
+    }
+
+    for (const auto& expected : acceptedReplies) {
+      if (incoming == expected || containsSequence(stream, expected)) {
+        usbLog("mini reply matched: %s", hexString(incoming).c_str());
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+Status UsbVciInterface::initializeMiniVci() {
+  usbLog("mini bootstrap start for %04x:%04x", detectedVid_, detectedPid_);
+
+  const std::vector<std::uint8_t> start1{0x03, 0x00, 0x03};
+  const std::vector<std::uint8_t> start2{0x0c, 0x00, 0x07, 0x00, 0x01, 0x4d, 0x56, 0x43, 0x49, 0x2d, 0x54, 0x62};
+  const std::vector<std::uint8_t> start3{0x13, 0x00, 0xd0, 0x4d, 0x01, 0xf7, 0x76, 0x39, 0x07, 0x6b,
+                                          0x27, 0x40, 0xea, 0x48, 0xfd, 0x6e, 0xa4, 0xa9, 0x00};
+
+  const std::vector<std::uint8_t> ack1{0x01, 0x60};
+  const std::vector<std::uint8_t> ack2WithStatus{0x01, 0x60, 0x0e, 0x00, 0x09, 0x00, 0x01, 0xb0,
+                                                 0xcb, 0x49, 0x68, 0x07, 0x45, 0xc8, 0x7f, 0xa9};
+  const std::vector<std::uint8_t> ack2NoStatus{0x0e, 0x00, 0x09, 0x00, 0x01, 0xb0,
+                                               0xcb, 0x49, 0x68, 0x07, 0x45, 0xc8, 0x7f, 0xa9};
+  const std::vector<std::uint8_t> ack3WithStatus{0x01, 0x60, 0x0b, 0x00, 0x71, 0x08, 0x8e,
+                                                 0x8d, 0x8d, 0xa6, 0xaa, 0xdf, 0x2f};
+  const std::vector<std::uint8_t> ack3NoStatus{0x0b, 0x00, 0x71, 0x08, 0x8e,
+                                               0x8d, 0x8d, 0xa6, 0xaa, 0xdf, 0x2f};
+
+  for (int attempt = 1; attempt <= 3; ++attempt) {
+    (void)flushInput();
+
+    if (writeRaw(start1) != STATUS_NOERROR || !waitForMiniReply({ack1}, 500)) {
+      usbLog("mini bootstrap stage1 attempt %d failed", attempt);
+      continue;
+    }
+    if (writeRaw(start2) != STATUS_NOERROR ||
+        !waitForMiniReply({ack2WithStatus, ack2NoStatus}, 900)) {
+      usbLog("mini bootstrap stage2 attempt %d failed", attempt);
+      continue;
+    }
+    if (writeRaw(start3) != STATUS_NOERROR ||
+        !waitForMiniReply({ack3WithStatus, ack3NoStatus}, 900)) {
+      usbLog("mini bootstrap stage3 attempt %d failed", attempt);
+      continue;
+    }
+
+    miniVciReady_ = true;
+    usbLog("mini bootstrap completed on attempt %d", attempt);
+    return STATUS_NOERROR;
+  }
+
+  return ERR_FAILED;
 }
 
 Status UsbVciInterface::flushInput() {
@@ -379,6 +664,10 @@ void UsbVciInterface::close() {
 
   rxBuffer_.clear();
   endpoints_ = {};
+  detectedVid_ = 0;
+  detectedPid_ = 0;
+  miniVciMode_ = false;
+  miniVciReady_ = false;
   activeConfiguration_ = -1;
   loopbackMode_ = false;
 }
@@ -392,24 +681,14 @@ Status UsbVciInterface::write(const std::vector<std::uint8_t>& packet) {
     return ERR_NOT_INITIALIZED;
   }
 
-  int transferred = 0;
-  const auto status = libusb_bulk_transfer(handle_, endpoints_.out,
-                                           const_cast<unsigned char*>(packet.data()),
-                                           static_cast<int>(packet.size()),
-                                           &transferred,
-                                           static_cast<unsigned int>(kUsbTimeoutMs));
-  if (status == LIBUSB_ERROR_PIPE) {
-    (void)recoverEndpoint(endpoints_.out);
-    return ERR_FAILED;
-  }
-  if (status == LIBUSB_ERROR_NO_DEVICE) {
-    return ERR_FAILED;
-  }
-  if (status != LIBUSB_SUCCESS || transferred != static_cast<int>(packet.size())) {
-    return ERR_FAILED;
+  if (miniVciMode_ && !miniVciReady_ && miniBootstrapEnabled()) {
+    const auto initStatus = initializeMiniVci();
+    if (initStatus != STATUS_NOERROR && miniBootstrapStrictEnabled()) {
+      return ERR_FAILED;
+    }
   }
 
-  return STATUS_NOERROR;
+  return writeRaw(packet);
 }
 
 Status UsbVciInterface::read(std::vector<std::uint8_t>& packet, std::uint32_t timeoutMs) {
@@ -422,39 +701,20 @@ Status UsbVciInterface::read(std::vector<std::uint8_t>& packet, std::uint32_t ti
   }
 
   while (true) {
-    if (rxBuffer_.size() >= 24) {
-      const std::uint32_t payloadSize = static_cast<std::uint32_t>(rxBuffer_[20]) |
-                                        (static_cast<std::uint32_t>(rxBuffer_[21]) << 8U) |
-                                        (static_cast<std::uint32_t>(rxBuffer_[22]) << 16U) |
-                                        (static_cast<std::uint32_t>(rxBuffer_[23]) << 24U);
-      if (rxBuffer_.size() >= 24U + payloadSize) {
-        packet.assign(rxBuffer_.begin(), rxBuffer_.begin() + static_cast<std::ptrdiff_t>(24U + payloadSize));
-        rxBuffer_.erase(rxBuffer_.begin(), rxBuffer_.begin() + static_cast<std::ptrdiff_t>(24U + payloadSize));
-        return STATUS_NOERROR;
-      }
+    if (tryExtractMvcIFrame(rxBuffer_, packet)) {
+      return STATUS_NOERROR;
     }
 
-    unsigned char buffer[512]{};
-    int transferred = 0;
-    const auto status = libusb_bulk_transfer(handle_, endpoints_.in, buffer, sizeof(buffer), &transferred, timeoutMs);
-    if (status == LIBUSB_ERROR_TIMEOUT) {
+    std::vector<std::uint8_t> incoming;
+    const auto status = readRaw(incoming, timeoutMs);
+    if (status == ERR_TIMEOUT) {
       return ERR_TIMEOUT;
     }
-    if (status == LIBUSB_ERROR_PIPE) {
-      (void)recoverEndpoint(endpoints_.in);
-      continue;
-    }
-    if (status == LIBUSB_ERROR_NO_DEVICE) {
-      return ERR_FAILED;
-    }
-    if (status != LIBUSB_SUCCESS) {
-      return ERR_FAILED;
-    }
-    if (transferred <= 0) {
-      return ERR_TIMEOUT;
+    if (status != STATUS_NOERROR) {
+      return status;
     }
 
-    rxBuffer_.insert(rxBuffer_.end(), buffer, buffer + transferred);
+    rxBuffer_.insert(rxBuffer_.end(), incoming.begin(), incoming.end());
   }
 }
 

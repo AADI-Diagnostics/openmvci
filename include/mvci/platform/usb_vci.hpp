@@ -46,6 +46,12 @@ private:
   Status findEndpoints();
   Status flushInput();
   Status recoverEndpoint(std::uint8_t endpointAddress);
+  Status initializeMiniVci();
+  Status writeRaw(const std::vector<std::uint8_t>& bytes);
+  Status readRaw(std::vector<std::uint8_t>& bytes, std::uint32_t timeoutMs);
+  bool waitForMiniReply(const std::vector<std::vector<std::uint8_t>>& acceptedReplies,
+                        std::uint32_t timeoutMs);
+  static bool miniBootstrapEnabled();
   static bool parseDeviceString(const std::string& deviceName,
                                 std::uint16_t& vid,
                                 std::uint16_t& pid,
@@ -54,6 +60,10 @@ private:
   libusb_context* context_{nullptr};
   libusb_device_handle* handle_{nullptr};
   EndpointSet endpoints_{};
+  std::uint16_t detectedVid_{0};
+  std::uint16_t detectedPid_{0};
+  bool miniVciMode_{false};
+  bool miniVciReady_{false};
   int activeConfiguration_{-1};
   bool loopbackMode_{false};
   std::unique_ptr<ITransport> loopback_;

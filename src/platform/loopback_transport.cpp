@@ -1,9 +1,12 @@
 #include "mvci/platform/transport.hpp"
 
 #include <chrono>
+#include <cstring>
 #include <condition_variable>
 #include <mutex>
 #include <queue>
+
+#include "mvci/packet.hpp"
 
 namespace mvci {
 namespace {
@@ -29,7 +32,37 @@ public:
       return ERR_NOT_INITIALIZED;
     }
     tx_.push(packet);
-    rx_.push(packet);
+
+    PacketFrame frame;
+    if (decodePacket(packet, frame) == STATUS_NOERROR) {
+      std::vector<std::uint8_t> responsePayload;
+      const auto& request = frame.payload;
+
+      if (request.size() >= 3 && request[0] == 0x19U && request[1] == 0x02U) {
+        responsePayload = {0x59U, 0x02U, request[2], 0x00U};
+      } else if (request.size() >= 4 && request[0] == 0x14U && request[1] == 0xFFU && request[2] == 0xFFU && request[3] == 0xFFU) {
+        responsePayload = {0x54U};
+      } else if (request.size() >= 3 && request[0] == 0x22U && request[1] == 0xF1U && request[2] == 0x90U) {
+        responsePayload = {0x62U, 0xF1U, 0x90U,
+                           'W', '0', 'L', '0', '0', '0', '0', '0', '0',
+                           '0', '0', '0', '0', '0', '0', '1'};
+      }
+
+      if (!responsePayload.empty()) {
+        PassThruMsg responseMsg{};
+        responseMsg.protocolId = frame.protocolId;
+        responseMsg.txFlags = frame.flags;
+        responseMsg.timestamp = frame.timestamp;
+        responseMsg.dataSize = static_cast<std::uint32_t>(responsePayload.size());
+        std::copy(responsePayload.begin(), responsePayload.end(), responseMsg.data);
+        rx_.push(encodePacket(responseMsg, frame.channel));
+      } else {
+        rx_.push(packet);
+      }
+    } else {
+      rx_.push(packet);
+    }
+
     condition_.notify_all();
     return STATUS_NOERROR;
   }
