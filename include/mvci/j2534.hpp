@@ -18,8 +18,8 @@ constexpr Status ERR_TIMEOUT = -6;
 constexpr Status ERR_BUFFER_EMPTY = -7;
 constexpr Status ERR_NOT_SUPPORTED = -8;
 
-constexpr std::uint32_t PROTOCOL_CAN = 0x0006;
-constexpr std::uint32_t PROTOCOL_ISO15765 = 0x0005;
+constexpr std::uint32_t PROTOCOL_CAN = 0x0005;
+constexpr std::uint32_t PROTOCOL_ISO15765 = 0x0006;
 
 constexpr std::uint32_t FILTER_PASS = 0x0001;
 constexpr std::uint32_t FILTER_BLOCK = 0x0002;
