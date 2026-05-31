@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -11,18 +10,6 @@
 
 namespace mvci {
 namespace {
-
-bool miniRawBackendEnabled() {
-  static const bool enabled = []() {
-    const char* value = std::getenv("MVCI_MINIVCI_RAW_BACKEND");
-    return value != nullptr && value[0] != '\0' && value[0] != '0';
-  }();
-  return enabled;
-}
-
-bool supportsRawBackendForProtocol(std::uint32_t protocolId) {
-  return protocolId == PROTOCOL_ISO15765;
-}
 
 void writeVersionString(char* destination, const char* value) {
   if (!destination) {
@@ -66,7 +53,6 @@ void Driver::close() {
   channels_.clear();
   periodicMessages_.clear();
   filters_.clear();
-  rawRxQueue_.clear();
   if (transport_) {
     transport_->close();
     transport_.reset();
@@ -86,7 +72,6 @@ Status Driver::connect(std::uint32_t protocolId,
   channels_[channelId] = ChannelState{protocolId, flags, baudRate};
   periodicMessages_[channelId] = {};
   filters_[channelId] = {};
-  rawRxQueue_[channelId] = {};
   return STATUS_NOERROR;
 }
 
@@ -99,7 +84,6 @@ Status Driver::disconnect(ChannelHandle channelId) {
   channels_.erase(it);
   periodicMessages_.erase(channelId);
   filters_.erase(channelId);
-  rawRxQueue_.erase(channelId);
   return STATUS_NOERROR;
 }
 
@@ -113,51 +97,6 @@ Status Driver::write(ChannelHandle channelId,
 
   if (channels_.find(channelId) == channels_.end()) {
     return ERR_INVALID_CHANNEL_ID;
-  }
-
-  const auto& channel = channels_.at(channelId);
-  auto& mutableChannel = channels_.at(channelId);
-  if (miniRawBackendEnabled() &&
-      !mutableChannel.rawBackendUnavailable &&
-      supportsRawBackendForProtocol(channel.protocolId)) {
-    auto& queue = rawRxQueue_[channelId];
-    bool fallbackToFramed = false;
-    for (std::uint32_t index = 0; index < numMsgs; ++index) {
-      const auto& msg = msgs[index];
-      if (msg.dataSize > sizeof(msg.data)) {
-        numMsgs = index;
-        return ERR_INVALID_MSG;
-      }
-
-      std::vector<std::uint8_t> request(msg.data, msg.data + msg.dataSize);
-      std::vector<std::uint8_t> response;
-      const auto status = transport_->miniRawRequest(request, response, timeoutMs);
-      if (status == ERR_NOT_SUPPORTED && index == 0U) {
-        mutableChannel.rawBackendUnavailable = true;
-        queue.clear();
-        fallbackToFramed = true;
-        break;
-      }
-      if (status != STATUS_NOERROR) {
-        numMsgs = index;
-        return status;
-      }
-
-      if (!response.empty()) {
-        PassThruMsg out{};
-        out.protocolId = channel.protocolId;
-        out.rxStatus = 0;
-        out.txFlags = msg.txFlags;
-        out.timestamp = msg.timestamp;
-        out.dataSize = static_cast<std::uint32_t>(std::min<std::size_t>(response.size(), sizeof(out.data)));
-        out.extraDataIndex = out.dataSize;
-        std::copy_n(response.begin(), out.dataSize, out.data);
-        queue.push_back(out);
-      }
-    }
-    if (!fallbackToFramed) {
-      return STATUS_NOERROR;
-    }
   }
 
   for (std::uint32_t index = 0; index < numMsgs; ++index) {
@@ -189,21 +128,6 @@ Status Driver::read(ChannelHandle channelId,
 
   if (channels_.find(channelId) == channels_.end()) {
     return ERR_INVALID_CHANNEL_ID;
-  }
-
-  const auto& channel = channels_.at(channelId);
-  if (miniRawBackendEnabled() &&
-      !channel.rawBackendUnavailable &&
-      supportsRawBackendForProtocol(channel.protocolId)) {
-    auto& queue = rawRxQueue_[channelId];
-    std::uint32_t deliveredFromQueue = 0;
-    while (deliveredFromQueue < numMsgs && !queue.empty()) {
-      msgs[deliveredFromQueue] = queue.front();
-      queue.pop_front();
-      ++deliveredFromQueue;
-    }
-    numMsgs = deliveredFromQueue;
-    return deliveredFromQueue > 0 ? STATUS_NOERROR : ERR_TIMEOUT;
   }
 
   std::uint32_t delivered = 0;

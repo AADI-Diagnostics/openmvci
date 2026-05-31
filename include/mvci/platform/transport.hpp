@@ -23,14 +23,6 @@ public:
                                  std::uint16_t index,
                                  std::vector<std::uint8_t>& data,
                                  std::uint32_t timeoutMs) = 0;
-  virtual Status miniRawRequest(const std::vector<std::uint8_t>& request,
-                                std::vector<std::uint8_t>& response,
-                                std::uint32_t timeoutMs) {
-    (void)request;
-    (void)response;
-    (void)timeoutMs;
-    return ERR_NOT_SUPPORTED;
-  }
   virtual void clearRx() = 0;
   virtual void clearTx() = 0;
 };

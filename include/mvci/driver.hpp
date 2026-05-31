@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <deque>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -60,7 +59,6 @@ private:
     std::uint32_t protocolId{0};
     std::uint32_t flags{0};
     std::uint32_t baudRate{0};
-    bool rawBackendUnavailable{false};
   };
 
   std::unique_ptr<ITransport> transport_;
@@ -71,7 +69,6 @@ private:
   std::unordered_map<ChannelHandle, ChannelState> channels_;
   std::unordered_map<ChannelHandle, std::unordered_map<std::uint32_t, PassThruMsg>> periodicMessages_;
   std::unordered_map<ChannelHandle, std::unordered_map<std::uint32_t, std::uint32_t>> filters_;
-  std::unordered_map<ChannelHandle, std::deque<PassThruMsg>> rawRxQueue_;
 };
 
 std::unique_ptr<ITransport> createPlatformTransport();

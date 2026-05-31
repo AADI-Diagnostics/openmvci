@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdlib>
 #include <iomanip>
 #include <map>
 #include <set>
@@ -15,8 +16,19 @@ namespace {
 constexpr std::uint32_t kObdBroadcastCanId = 0x000007DFU;
 constexpr std::size_t kCanIdPrefixLen = 4U;
 
+std::uint32_t resolveRequestCanId() {
+  if (const char* env = std::getenv("MVCI_OBD_CAN_ID")) {
+    try {
+      return static_cast<std::uint32_t>(std::stoul(env, nullptr, 0));
+    } catch (...) {
+      // fall through to default
+    }
+  }
+  return kObdBroadcastCanId;
+}
+
 std::vector<std::uint8_t> withCanIdPrefix(const std::vector<std::uint8_t>& payload,
-                                          std::uint32_t canId = kObdBroadcastCanId) {
+                                          std::uint32_t canId = resolveRequestCanId()) {
   std::vector<std::uint8_t> wrapped;
   wrapped.reserve(kCanIdPrefixLen + payload.size());
   wrapped.push_back(static_cast<std::uint8_t>((canId >> 24U) & 0xFFU));
