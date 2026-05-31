@@ -25,6 +25,10 @@ constexpr std::uint32_t FILTER_PASS = 0x0001;
 constexpr std::uint32_t FILTER_BLOCK = 0x0002;
 constexpr std::uint32_t FILTER_FLOW_CONTROL = 0x0003;
 
+// J2534-1 TxFlags / RxStatus bits.
+constexpr std::uint32_t ISO15765_FRAME_PAD = 0x00000040;
+constexpr std::uint32_t CAN_29BIT_ID = 0x00000100;
+
 constexpr std::uint32_t IOCTL_SET_CONFIG = 0x0001;
 constexpr std::uint32_t IOCTL_GET_CONFIG = 0x0002;
 constexpr std::uint32_t IOCTL_CLEAR_RX_BUFFER = 0x0003;

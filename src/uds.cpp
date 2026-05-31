@@ -1,14 +1,38 @@
 #include "mvci/uds.hpp"
+#include "mvci/api.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <iomanip>
 #include <map>
+#include <set>
 #include <sstream>
 
 namespace mvci {
 namespace {
+
+constexpr std::uint32_t kObdBroadcastCanId = 0x000007DFU;
+constexpr std::size_t kCanIdPrefixLen = 4U;
+
+std::vector<std::uint8_t> withCanIdPrefix(const std::vector<std::uint8_t>& payload,
+                                          std::uint32_t canId = kObdBroadcastCanId) {
+  std::vector<std::uint8_t> wrapped;
+  wrapped.reserve(kCanIdPrefixLen + payload.size());
+  wrapped.push_back(static_cast<std::uint8_t>((canId >> 24U) & 0xFFU));
+  wrapped.push_back(static_cast<std::uint8_t>((canId >> 16U) & 0xFFU));
+  wrapped.push_back(static_cast<std::uint8_t>((canId >> 8U) & 0xFFU));
+  wrapped.push_back(static_cast<std::uint8_t>(canId & 0xFFU));
+  wrapped.insert(wrapped.end(), payload.begin(), payload.end());
+  return wrapped;
+}
+
+std::vector<std::uint8_t> stripCanIdPrefix(const std::vector<std::uint8_t>& frame) {
+  if (frame.size() <= kCanIdPrefixLen) {
+    return frame;
+  }
+  return std::vector<std::uint8_t>(frame.begin() + kCanIdPrefixLen, frame.end());
+}
 
 bool isPositiveResponse(const std::vector<std::uint8_t>& response, std::uint8_t serviceId) {
   return !response.empty() && response.front() == static_cast<std::uint8_t>(serviceId + 0x40U);
@@ -21,13 +45,54 @@ std::uint32_t readDtcCode(const std::uint8_t* data) {
 }
 
 Status writeSingleFrame(ChannelHandle channelId, const std::vector<std::uint8_t>& request) {
+  const auto framed = withCanIdPrefix(request);
   PassThruMsg msg{};
   msg.protocolId = PROTOCOL_ISO15765;
-  msg.dataSize = static_cast<std::uint32_t>(std::min<std::size_t>(request.size(), sizeof(msg.data)));
-  std::copy_n(request.begin(), msg.dataSize, msg.data);
+  msg.txFlags = ISO15765_FRAME_PAD;
+  msg.dataSize = static_cast<std::uint32_t>(std::min<std::size_t>(framed.size(), sizeof(msg.data)));
+  std::copy_n(framed.begin(), msg.dataSize, msg.data);
 
   std::uint32_t count = 1;
   return PassThruWriteMsgs(channelId, &msg, &count, 1000);
+}
+
+void buildCanIdMsg(PassThruMsg& msg, std::uint32_t canId) {
+  msg.protocolId = PROTOCOL_ISO15765;
+  msg.txFlags = ISO15765_FRAME_PAD;
+  msg.dataSize = 4U;
+  msg.data[0] = static_cast<std::uint8_t>((canId >> 24U) & 0xFFU);
+  msg.data[1] = static_cast<std::uint8_t>((canId >> 16U) & 0xFFU);
+  msg.data[2] = static_cast<std::uint8_t>((canId >> 8U) & 0xFFU);
+  msg.data[3] = static_cast<std::uint8_t>(canId & 0xFFU);
+}
+
+// Install ISO-15765 flow-control filter pairs for the standard 11-bit OBD-II
+// ECU range (tx 0x7E0..0x7E7 -> rx 0x7E8..0x7EF) plus the functional broadcast
+// (tx 0x7DF -> rx 0x7E8) on first use of a channel. Without these filters the
+// adapter has no rules to accept incoming response frames, so reads time out
+// even when the ECU is replying on the bus.
+void ensureObdFlowControlFilters(ChannelHandle channelId) {
+  static std::set<ChannelHandle> initialised;
+  if (initialised.count(channelId) != 0U) {
+    return;
+  }
+  initialised.insert(channelId);
+
+  const std::uint32_t mask = 0xFFFFFFFFU;
+  for (std::uint32_t ecu = 0U; ecu < 8U; ++ecu) {
+    const std::uint32_t txId = 0x7E0U + ecu;
+    const std::uint32_t rxId = 0x7E8U + ecu;
+
+    PassThruMsg maskMsg{};
+    buildCanIdMsg(maskMsg, mask);
+    PassThruMsg patternMsg{};
+    buildCanIdMsg(patternMsg, rxId);
+    PassThruMsg fcMsg{};
+    buildCanIdMsg(fcMsg, txId);
+
+    std::uint32_t filterId = 0;
+    PassThruStartMsgFilter(channelId, FILTER_FLOW_CONTROL, &maskMsg, &patternMsg, &fcMsg, &filterId);
+  }
 }
 
 } // namespace
@@ -58,6 +123,8 @@ Status sendUdsRequest(ChannelHandle channelId,
     return ERR_INVALID_MSG;
   }
 
+  ensureObdFlowControlFilters(channelId);
+
   const auto writeStatus = writeSingleFrame(channelId, request);
   if (writeStatus != STATUS_NOERROR) {
     return writeStatus;
@@ -78,7 +145,8 @@ Status sendUdsRequest(ChannelHandle channelId,
       return readStatus;
     }
 
-    responses.emplace_back(msg.data, msg.data + msg.dataSize);
+    std::vector<std::uint8_t> payload(msg.data, msg.data + msg.dataSize);
+    responses.emplace_back(stripCanIdPrefix(payload));
     if (remaining == 0U) {
       break;
     }

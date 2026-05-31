@@ -22,6 +22,7 @@
 #include <cstring>
 #include <fstream>
 #include <algorithm>
+#include <cctype>
 #include <map>
 #include <string>
 #include <thread>
@@ -86,8 +87,30 @@ std::string findSerial() {
 }
 
 int openPort(const std::string& path, bool exclusive) {
-  int fd = ::open(path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-  if (fd < 0) return -1;
+  std::string activePath = path;
+  int fd = -1;
+  int lastErrno = 0;
+  for (int attempt = 1; attempt <= 20; ++attempt) {
+    fd = ::open(activePath.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
+    if (fd >= 0) {
+      break;
+    }
+    lastErrno = errno;
+
+    if (lastErrno == ENOENT || lastErrno == ETIMEDOUT || lastErrno == ENXIO || lastErrno == EIO) {
+      const std::string discovered = findSerial();
+      if (!discovered.empty()) {
+        activePath = discovered;
+      }
+    }
+
+    // Mini-VCI nodes can flap briefly during line-state transitions.
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+  }
+  if (fd < 0) {
+    errno = lastErrno;
+    return -1;
+  }
   int flags = ::fcntl(fd, F_GETFL, 0);
   if (flags >= 0) ::fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
   if (exclusive) {
@@ -244,7 +267,9 @@ std::vector<TraceEvent> parseBulkTraceFromPcap(const std::string& pcapPath) {
   return filtered;
 }
 
-std::vector<ReplayStep> buildReplayProfile(const std::vector<TraceEvent>& events, std::size_t maxSteps) {
+std::vector<ReplayStep> buildReplayProfile(const std::vector<TraceEvent>& events,
+                                           std::size_t startOffset,
+                                           std::size_t maxSteps) {
   std::vector<ReplayStep> steps;
   if (events.empty()) {
     return steps;
@@ -280,8 +305,9 @@ std::vector<ReplayStep> buildReplayProfile(const std::vector<TraceEvent>& events
     return steps;
   }
 
-  const std::size_t endOutPos = std::min(outIdx.size(), startOutPos + maxSteps);
-  for (std::size_t p = startOutPos; p < endOutPos; ++p) {
+  const std::size_t firstOutPos = std::min(outIdx.size(), startOutPos + startOffset);
+  const std::size_t endOutPos = std::min(outIdx.size(), firstOutPos + maxSteps);
+  for (std::size_t p = firstOutPos; p < endOutPos; ++p) {
     const std::size_t outEventIdx = outIdx[p];
     const std::size_t nextOutEventIdx = (p + 1 < outIdx.size()) ? outIdx[p + 1] : events.size();
     const std::size_t nextOutIdx = (p + 1 < outIdx.size()) ? outIdx[p + 1] : outEventIdx;
@@ -388,6 +414,53 @@ CtrlMode parseCtrlMode(const std::string& mode) {
   return CtrlMode::Pulse;
 }
 
+bool parseHexBytes(const std::string& text, std::vector<std::uint8_t>& out) {
+  out.clear();
+  std::string cleaned;
+  cleaned.reserve(text.size());
+  for (char c : text) {
+    if (std::isxdigit(static_cast<unsigned char>(c)) != 0) {
+      cleaned.push_back(c);
+    }
+  }
+  if (cleaned.empty() || (cleaned.size() % 2U) != 0U) {
+    return false;
+  }
+
+  out.reserve(cleaned.size() / 2U);
+  for (std::size_t i = 0; i < cleaned.size(); i += 2U) {
+    const auto byteStr = cleaned.substr(i, 2U);
+    char* end = nullptr;
+    const auto value = std::strtoul(byteStr.c_str(), &end, 16);
+    if (end == byteStr.c_str() || *end != '\0' || value > 0xFFU) {
+      out.clear();
+      return false;
+    }
+    out.push_back(static_cast<std::uint8_t>(value));
+  }
+  return true;
+}
+
+bool decodeMiniObfuscatedIcvm(const std::vector<std::uint8_t>& in,
+                              std::vector<std::uint8_t>& out) {
+  out.clear();
+  if (in.size() < 4 || in[0] != 0x49) {
+    return false;
+  }
+
+  static constexpr std::uint8_t key[3] = {0x88, 0xFA, 0x78};
+  out = in;
+  for (std::size_t i = 1; i < out.size(); ++i) {
+    out[i] ^= key[(i - 1) % 3];
+  }
+
+  return out.size() >= 4 &&
+         out[0] == 0x49 &&
+         out[1] == 0x43 &&
+         out[3] == 0x4D &&
+         (out[2] == 0x56 || out[2] == 0x57);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -395,6 +468,14 @@ int main(int argc, char** argv) {
   std::string pcapPath;
   int pcapCycles = 1;
   int pcapGapScale = 1;
+  int pcapMaxSteps = 12;
+  int pcapStartOffset = 0;
+  unsigned int baudOnly = 0;
+  bool pcapShowRx = false;
+  bool decodeIcvm = true;
+  int sendReadMs = 250;
+  std::vector<std::string> sendHexList;
+  std::vector<std::uint32_t> sendIcvmProtocols;
   bool exclusive = true;
   bool ctrlMatrix = false;
   CtrlMode ctrlMode = CtrlMode::Pulse;
@@ -410,6 +491,38 @@ int main(int argc, char** argv) {
     }
     if (arg == "--pcap-gap-scale" && i + 1 < argc) {
       pcapGapScale = std::max(1, std::atoi(argv[++i]));
+      continue;
+    }
+    if (arg == "--pcap-max-steps" && i + 1 < argc) {
+      pcapMaxSteps = std::max(1, std::atoi(argv[++i]));
+      continue;
+    }
+    if (arg == "--pcap-start-offset" && i + 1 < argc) {
+      pcapStartOffset = std::max(0, std::atoi(argv[++i]));
+      continue;
+    }
+    if (arg == "--baud" && i + 1 < argc) {
+      baudOnly = static_cast<unsigned int>(std::strtoul(argv[++i], nullptr, 10));
+      continue;
+    }
+    if (arg == "--pcap-show-rx") {
+      pcapShowRx = true;
+      continue;
+    }
+    if (arg == "--no-decode-icvm") {
+      decodeIcvm = false;
+      continue;
+    }
+    if (arg == "--send-hex" && i + 1 < argc) {
+      sendHexList.push_back(argv[++i]);
+      continue;
+    }
+    if (arg == "--send-icvm-protocol" && i + 1 < argc) {
+      sendIcvmProtocols.push_back(static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 0)));
+      continue;
+    }
+    if (arg == "--send-read-ms" && i + 1 < argc) {
+      sendReadMs = std::max(1, std::atoi(argv[++i]));
       continue;
     }
     if (arg == "--no-excl") {
@@ -458,24 +571,33 @@ int main(int argc, char** argv) {
       {"7E (b)",        {0x7E}},
   };
 
-  const std::vector<unsigned int> bauds = {
-      500000, 230400, 115200, 38400, 57600, 19200, 9600
-  };
+  std::vector<unsigned int> bauds;
+  if (baudOnly != 0U) {
+    bauds = {baudOnly};
+  } else {
+    bauds = {500000, 230400, 115200, 38400, 57600, 19200, 9600};
+  }
 
   std::vector<ReplayStep> profile;
   if (!pcapPath.empty()) {
     auto trace = parseBulkTraceFromPcap(pcapPath);
-    profile = buildReplayProfile(trace, 12);
+    profile = buildReplayProfile(
+      trace,
+      static_cast<std::size_t>(pcapStartOffset),
+      static_cast<std::size_t>(pcapMaxSteps));
     std::printf("pcap mode: %s\n", pcapPath.c_str());
-    std::printf("pcap events: %zu, replay steps: %zu, cycles: %d, gap-scale: %d\n",
-          trace.size(), profile.size(), pcapCycles, pcapGapScale);
+    std::printf("pcap events: %zu, replay steps: %zu, cycles: %d, gap-scale: %d, start-offset: %d, max-steps: %d\n",
+        trace.size(), profile.size(), pcapCycles, pcapGapScale, pcapStartOffset, pcapMaxSteps);
     if (profile.empty()) {
       std::printf("warning: failed to build replay profile from pcap, falling back to generic probes\n");
     }
   }
 
   int fd = openPort(path, exclusive);
-  if (fd < 0) { std::perror("open"); return 1; }
+  if (fd < 0) {
+    std::fprintf(stderr, "open(%s) failed after retries: %s\n", path.c_str(), std::strerror(errno));
+    return 1;
+  }
 
   std::vector<CtrlMode> ctrlModes;
   if (ctrlMatrix) {
@@ -549,6 +671,19 @@ int main(int argc, char** argv) {
               std::printf("rx[%zu] ", resp.size());
             }
             std::printf("%s\n", ok ? "MATCH" : "MISS");
+            if (pcapShowRx && !resp.empty()) {
+              std::printf("        rxhex: ");
+              hex(resp);
+              std::printf("\n");
+              if (decodeIcvm) {
+                std::vector<std::uint8_t> decoded;
+                if (decodeMiniObfuscatedIcvm(resp, decoded)) {
+                  std::printf("        rxdec: ");
+                  hex(decoded);
+                  std::printf("\n");
+                }
+              }
+            }
           }
         }
 
@@ -557,6 +692,49 @@ int main(int argc, char** argv) {
         totalMatched += matched;
         totalRxSteps += seenAny;
         std::printf("  [pcap replay summary] matched=%d/%d rx_steps=%d\n", matched, baudTotalSteps, seenAny);
+
+        if (!sendHexList.empty()) {
+          std::printf("  [custom send-hex probes]\n");
+          for (std::size_t i = 0; i < sendHexList.size(); ++i) {
+            std::vector<std::uint8_t> probe;
+            if (!parseHexBytes(sendHexList[i], probe)) {
+              std::printf("    custom %02zu parse error: %s\n", i + 1, sendHexList[i].c_str());
+              continue;
+            }
+            if (i < sendIcvmProtocols.size() &&
+                probe.size() >= 12 &&
+                probe[0] == 0x49 &&
+                probe[1] == 0x43 &&
+                probe[2] == 0x56 &&
+                probe[3] == 0x4D) {
+              const auto protocol = sendIcvmProtocols[i];
+              probe[8] = static_cast<std::uint8_t>(protocol & 0xffU);
+              probe[9] = static_cast<std::uint8_t>((protocol >> 8) & 0xffU);
+              probe[10] = static_cast<std::uint8_t>((protocol >> 16) & 0xffU);
+              probe[11] = static_cast<std::uint8_t>((protocol >> 24) & 0xffU);
+              std::printf("    custom %02zu protocol override -> %u\n", i + 1, protocol);
+            }
+            ::tcflush(fd, TCIOFLUSH);
+            writeAll(fd, probe);
+            const auto resp = readFor(fd, sendReadMs);
+            std::printf("    custom %02zu tx[%zu] wait=%dms -> ", i + 1, probe.size(), sendReadMs);
+            if (resp.empty()) {
+              std::printf("no-rx\n");
+            } else {
+              std::printf("rx[%zu]: ", resp.size());
+              hex(resp);
+              std::printf("\n");
+              if (decodeIcvm) {
+                std::vector<std::uint8_t> decoded;
+                if (decodeMiniObfuscatedIcvm(resp, decoded)) {
+                  std::printf("      decoded: ");
+                  hex(decoded);
+                  std::printf("\n");
+                }
+              }
+            }
+          }
+        }
         continue;
       }
 

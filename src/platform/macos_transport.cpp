@@ -122,6 +122,12 @@ public:
                   : ERR_NOT_INITIALIZED;
   }
 
+  Status miniRawRequest(const std::vector<std::uint8_t>& request,
+                        std::vector<std::uint8_t>& response,
+                        std::uint32_t timeoutMs) override {
+    return inner_ ? inner_->miniRawRequest(request, response, timeoutMs) : ERR_NOT_INITIALIZED;
+  }
+
   void clearRx() override { if (inner_) inner_->clearRx(); }
   void clearTx() override { if (inner_) inner_->clearTx(); }
 

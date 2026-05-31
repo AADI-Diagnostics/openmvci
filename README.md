@@ -130,13 +130,55 @@ On macOS, automatic serial discovery probes both `/dev/tty.usb*` and `/dev/cu.us
 - `MVCI_MINIVCI_BOOTSTRAP=0` disables the Mini-VCI startup handshake (enabled by default).
 - `MVCI_MINIVCI_BOOTSTRAP_STRICT=1` rejects adapters that fail bootstrap (disabled by default).
 - `MVCI_MINIVCI_STAGE1_STRICT=1` requires explicit stage-1 ACK (`01 60`), otherwise stage-1 timeout is tolerated.
+- `MVCI_MINIVCI_POST_BOOTSTRAP=0` disables the PCAP-derived post-bootstrap unlock script (enabled by default).
+- `MVCI_MINIVCI_POST_BOOTSTRAP_STRICT=1` treats post-bootstrap script mismatch as bootstrap failure.
+- `MVCI_MINIVCI_KEEPALIVE_BRIDGE=0` disables the pre-ICVM low-level keepalive probe.
+- `MVCI_MINIVCI_SESSION_TICKLE=0` disables periodic low-level session tickles while waiting for ICVM replies.
+- `MVCI_MINIVCI_ALT_INIT=1` enables an alternate stage-2 follow-up init sequence observed in the original PCAP.
+- `MVCI_MINIVCI_RAW_BACKEND=1` enables an experimental Mini raw request/reply backend for ISO15765 channels (sends UDS payload bytes directly, bypassing ICVM framing; only useful for adapters that frame/route ISO-TP themselves).
+- `MVCI_MINIVCI_ICVM_PRIME_SWEEP=1` sends an experimental protocol-sweep burst (`3`, `5`, `7`) before the first runtime ICVM request.
+- `MVCI_MINIVCI_ICVM_FLUSH=1` flushes serial buffers before each runtime ICVM write to mirror `mvci_probe` custom-send behavior.
+- `MVCI_MINIVCI_REPLAY_BEFORE_ICVM=1` replays the post-bootstrap Mini sequence again immediately before the first runtime ICVM request.
+- `MVCI_MINIVCI_REPLAY20_BEFORE_ICVM=1` replays a probe-aligned 20-step startup profile before the first runtime ICVM request.
+- `MVCI_MINIVCI_REPLAY20_CYCLES=<n>` repeats that 20-step profile replay for multiple cycles (default `1`).
+- `MVCI_MINIVCI_TRANSITION_PROBES=1` sends an experimental low-level command set after transformed replay20 state detection and before first ICVM write.
+- `MVCI_MINIVCI_TRANSITION_PROBES_EACH_ICVM=1` (with transition probes enabled) reruns that low-level command set before every ICVM write instead of only once.
+- `MVCI_MINIVCI_TRANSITION_7D25_FOLLOWUP=1` runs an additional short follow-up sequence when transition probes return the transformed `0x7d` reply family.
+- `MVCI_MINIVCI_TRANSITION_7D25_FOLLOWUP_EACH_ICVM=1` forces the `0x7d` follow-up sequence on every ICVM attempt as long as the last known transition probe family remains `0x7d`.
+- `MVCI_MINIVCI_TRANSITION_7D25_PROTOCOL_SWEEP=1` expands the ICVM prime protocol sweep to additional protocol IDs when the last transition probe response family is `0x7d`.
+- `MVCI_MINIVCI_REPLAY_LOOSE=1` uses timing-only post-bootstrap replay (no strict expected-reply matching) when replay-before-ICVM is enabled.
+- `MVCI_MINIVCI_CAPTURE_NON_MVCI=1` logs non-MVCI RX buffers observed while waiting for ICVM responses (diagnostic instrumentation).
+
+If serial opens fail intermittently with `No such file or directory` or `Operation timed out` on `/dev/cu.usbserial-*`, power-cycle or replug the adapter and retry. Some clone devices temporarily drop their VCP node during line-state transitions.
+
+`mvci_probe` now supports focused pcap windows and custom packet probes:
+- `--baud <rate>` limits probing to a single baud.
+- `--pcap-start-offset <n>` and `--pcap-max-steps <n>` select replay window after startup.
+- `--pcap-show-rx` prints per-step reply hex.
+- `--no-decode-icvm` disables probe-side decoding attempts for obfuscated ICVM-like replies.
+- `--send-hex <hex>` sends custom frames after replay (repeatable).
+- `--send-icvm-protocol <n>` overrides bytes 8..11 of the matching custom ICVM request with a little-endian MVCI protocol value.
+- `--send-read-ms <ms>` controls custom probe read timeout.
+
+For repeatable mapping runs, use:
+`tools/run_minivci_mapping.sh [serial-node] [pcap-path] [build-dir]`
+- `MAPPING_ICVM_ATTEMPTS=<n>` retries the ICVM custom probe phase (default `5`) to catch intermittent response windows.
 - `MVCI_VERBOSE_USB=1` enables verbose USB transport logs.
 - `MVCI_VERBOSE_SERIAL=1` enables verbose serial transport logs.
 - `MVCI_SERIAL_BAUD=<rate>` overrides the initial serial baud rate (default `500000`).
+- `MVCI_SERIAL_OPEN_RETRY_MS=<ms>` controls how long serial open waits for adapter re-enumeration (default `3000`).
 - `MVCI_SERIAL_ASSERT_CTRL=0` disables asserting `DTR/RTS` on open (enabled by default).
+- `MVCI_SERIAL_CTRL_MODE=<assert|none|pulse>` explicitly controls `DTR/RTS` policy on open.
+- `MVCI_SERIAL_CTRL_AUTO=0` disables automatic fallback across control-line modes during bootstrap.
 - `MVCI_SERIAL_RTSCTS=1` enables hardware flow control (`RTS/CTS`) for adapters that require it.
 - `MVCI_SERIAL_REQUIRE_RX=1` rejects serial nodes that emit no RX bytes shortly after open.
 - `MVCI_SERIAL_REQUIRE_RX_TIMEOUT_MS=<ms>` tunes the RX-observation window (default `250`).
+
+Serial transport now also attempts automatic in-session recovery when macOS reports transient device loss errors (for example `Device not configured`) by reopening and reconfiguring the active serial node.
+
+After successful serial recovery, openmvci now re-runs Mini bootstrap before allowing ICVM traffic.
+
+If an ICVM write arrives while Mini transport is not ready, openmvci now performs a one-shot bootstrap retry (including baud/control-mode fallback) before rejecting the write with `not initialized`.
 
 With `MVCI_VERBOSE_SERIAL=1`, serial transport logs now include hex dumps for TX/RX chunks.
 
