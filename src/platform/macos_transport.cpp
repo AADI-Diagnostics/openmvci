@@ -2,7 +2,9 @@
 #include "mvci/platform/serial_transport.hpp"
 #include "mvci/platform/usb_vci.hpp"
 
-#include <dirent.h>
+#include <CoreFoundation/CoreFoundation.h>
+#include <IOKit/IOKitLib.h>
+#include <IOKit/serial/IOSerialKeys.h>
 #include <sys/stat.h>
 
 #include <cstdio>
@@ -31,35 +33,50 @@ void macLog(const char* msg) {
   std::fprintf(stderr, "[mvci macos] %s\n", msg);
 }
 
+// macOS does not expose /dev/{cu,tty}.usb* via readdir("/dev") -- those
+// nodes are created dynamically by IOKit and only show up via stat(). The
+// portable way to enumerate them is to query the IORegistry for matching
+// `IOSerialBSDClient` services and read the `IOCalloutDevice` property:
 std::vector<std::string> findUsbSerialNodes() {
   std::vector<std::string> nodes;
-  DIR* dir = ::opendir("/dev");
-  if (!dir) return nodes;
-  while (auto* entry = ::readdir(dir)) {
-    const std::string name = entry->d_name;
-    if (name.rfind("cu.usbserial", 0) == 0 ||
-        name.rfind("tty.usbserial", 0) == 0 ||
-        name.rfind("cu.usbmodem", 0) == 0 ||
-        name.rfind("tty.usbmodem", 0) == 0) {
-      nodes.push_back("/dev/" + name);
-    }
-  }
-  ::closedir(dir);
 
-  // Prefer usbserial names before usbmodem, then tty before cu for stable probing.
+  CFMutableDictionaryRef matching = IOServiceMatching(kIOSerialBSDServiceValue);
+  if (!matching) return nodes;
+  // Restrict to RS-232 / USB-serial style devices (excludes Bluetooth-SPP, etc.):
+  CFDictionarySetValue(matching, CFSTR(kIOSerialBSDTypeKey), CFSTR(kIOSerialBSDAllTypes));
+
+  io_iterator_t it = IO_OBJECT_NULL;
+  if (IOServiceGetMatchingServices(kIOMainPortDefault, matching, &it) != KERN_SUCCESS) {
+    return nodes;
+  }
+
+  for (io_object_t svc = IOIteratorNext(it); svc; svc = IOIteratorNext(it)) {
+    CFTypeRef pathRef = IORegistryEntryCreateCFProperty(
+        svc, CFSTR(kIOCalloutDeviceKey), kCFAllocatorDefault, 0);
+    if (pathRef && CFGetTypeID(pathRef) == CFStringGetTypeID()) {
+      char buf[256] = {};
+      if (CFStringGetCString(static_cast<CFStringRef>(pathRef),
+                             buf, sizeof(buf), kCFStringEncodingUTF8)) {
+        const std::string path = buf;
+        if (path.find("/cu.usbserial") != std::string::npos ||
+            path.find("/cu.usbmodem") != std::string::npos) {
+          struct stat st {};
+          if (::stat(path.c_str(), &st) == 0) nodes.push_back(path);
+        }
+      }
+    }
+    if (pathRef) CFRelease(pathRef);
+    IOObjectRelease(svc);
+  }
+  IOObjectRelease(it);
+
+  // Prefer usbserial (FTDI) over usbmodem (CDC-ACM) for the Mini-VCI.
   std::sort(nodes.begin(), nodes.end(), [](const std::string& a, const std::string& b) {
-    auto rank = [](const std::string& p) {
-      int r = 0;
-      if (p.find("usbmodem") != std::string::npos) r += 10;
-      if (p.find("/dev/cu.") != std::string::npos) r += 1;
-      return r;
-    };
-    const int ra = rank(a);
-    const int rb = rank(b);
-    if (ra != rb) return ra < rb;
+    const bool am = a.find("usbmodem") != std::string::npos;
+    const bool bm = b.find("usbmodem") != std::string::npos;
+    if (am != bm) return !am;
     return a < b;
   });
-
   nodes.erase(std::unique(nodes.begin(), nodes.end()), nodes.end());
   return nodes;
 }

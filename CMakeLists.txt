@@ -26,6 +26,10 @@ add_library(openmvci
 
 if(APPLE)
   target_sources(openmvci PRIVATE src/platform/macos_transport.cpp)
+  target_link_libraries(openmvci PRIVATE
+    "-framework IOKit"
+    "-framework CoreFoundation"
+  )
 elseif(WIN32)
   target_sources(openmvci PRIVATE src/platform/windows_transport.cpp)
 else()
