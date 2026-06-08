@@ -1,0 +1,8 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/cmarshall/Desktop/openmvci/build-ci/cmake_install.cmake",
+		"/Users/cmarshall/Desktop/openmvci/build-ci/_deps/doctest-build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
