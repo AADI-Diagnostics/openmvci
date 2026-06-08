@@ -29,3 +29,8 @@
 # Python Cache
 *.pyc
 __pycache__/
+
+# Github workflow CI
+build-ci/
+build-package/
+package-ci/

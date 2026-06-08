@@ -39,7 +39,7 @@ jobs:
         shell: pwsh
         run: |
           vcpkg install libusb:x64-windows
-          "CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake" >> $env:GITHUB_ENV
+          echo "CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake" >> $env:GITHUB_ENV
 
       - name: Configure CMake
         shell: bash
@@ -53,15 +53,29 @@ jobs:
 
       - name: Build
         shell: bash
-        run: cmake --build build --config ${{ matrix.build_type }} --parallel 4
+        run: cmake --build build --config ${{ matrix.build_type }} --parallel
 
       - name: Run tests
         shell: bash
         run: ctest --test-dir build -C ${{ matrix.build_type }} --output-on-failure
 
+      - name: Configure for packaging (no tests/examples for clean distributable)
+        shell: bash
+        run: |
+          cmake -S . -B build-package \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DBUILD_SHARED_LIBS=ON \
+            -DMVCI_BUILD_TESTS=OFF \
+            -DMVCI_BUILD_EXAMPLES=OFF \
+            ${CMAKE_TOOLCHAIN_FILE:+-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}}
+
+      - name: Build for packaging
+        shell: bash
+        run: cmake --build build-package --config ${{ matrix.build_type }} --parallel
+
       - name: Install to staging directory (for artifacts)
         shell: bash
-        run: cmake --install build --prefix ${{ github.workspace }}/package
+        run: cmake --install build-package --prefix ${{ github.workspace }}/package
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

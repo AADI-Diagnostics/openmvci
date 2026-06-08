@@ -1,1 +1,0 @@
-/usr/bin/c++ -O3 -DNDEBUG -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/openmvci_unit_uds.dir/tests/tests_unit_uds.cpp.o -o openmvci_unit_uds  -Wl,-rpath,/Users/cmarshall/Desktop/openmvci/build-ci libopenmvci.dylib
