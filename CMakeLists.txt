@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 
 project(OpenMVCI VERSION 1.0.0 LANGUAGES CXX)
 
-option(MVCI_BUILD_TESTS "Build MVCI smoke tests" ON)
+option(MVCI_BUILD_TESTS "Build MVCI tests (smoke and unit)" ON)
 option(MVCI_BUILD_EXAMPLES "Build MVCI examples" ON)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
@@ -62,15 +62,29 @@ find_package(LibUSB REQUIRED)
 target_link_libraries(openmvci PRIVATE LibUSB::LibUSB)
 
 if(MVCI_BUILD_TESTS)
+  # Workaround for doctest v2.4.11 (and similar older subprojects) when using
+  # very new CMake versions (3.31+), which removed support for policy versions < 3.5.
+  # This must be set before FetchContent_MakeAvailable so the fetched project
+  # sees a compatible minimum policy version.
+  set(CMAKE_POLICY_VERSION_MINIMUM "3.5")
+
+  include(FetchContent)
+  FetchContent_Declare(
+    doctest
+    GIT_REPOSITORY https://github.com/doctest/doctest.git
+    GIT_TAG        v2.4.11
+  )
+  FetchContent_MakeAvailable(doctest)
+
   enable_testing()
-  add_executable(openmvci_smoke tests/smoke.cpp)
-  add_executable(openmvci_unit_api tests/unit_api.cpp)
-  add_executable(openmvci_unit_uds tests/unit_uds.cpp)
-  add_executable(openmvci_unit_frame_resync tests/unit_frame_resync.cpp)
-  target_link_libraries(openmvci_smoke PRIVATE openmvci Threads::Threads)
-  target_link_libraries(openmvci_unit_api PRIVATE openmvci Threads::Threads)
-  target_link_libraries(openmvci_unit_uds PRIVATE openmvci Threads::Threads)
-  target_link_libraries(openmvci_unit_frame_resync PRIVATE openmvci Threads::Threads)
+  add_executable(openmvci_smoke tests/tests_smoke.cpp)
+  add_executable(openmvci_unit_api tests/tests_unit_api.cpp)
+  add_executable(openmvci_unit_uds tests/tests_unit_uds.cpp)
+  add_executable(openmvci_unit_frame_resync tests/tests_unit_frame_resync.cpp)
+  target_link_libraries(openmvci_smoke PRIVATE openmvci Threads::Threads doctest::doctest)
+  target_link_libraries(openmvci_unit_api PRIVATE openmvci Threads::Threads doctest::doctest)
+  target_link_libraries(openmvci_unit_uds PRIVATE openmvci Threads::Threads doctest::doctest)
+  target_link_libraries(openmvci_unit_frame_resync PRIVATE openmvci Threads::Threads doctest::doctest)
   add_test(NAME openmvci_smoke COMMAND openmvci_smoke)
   add_test(NAME openmvci_unit_api COMMAND openmvci_unit_api)
   add_test(NAME openmvci_unit_uds COMMAND openmvci_unit_uds)
