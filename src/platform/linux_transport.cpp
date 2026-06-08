@@ -44,11 +44,6 @@ public:
   Status open(const std::string& deviceName) override {
     close();
 
-    if (deviceName == "loopback") {
-      inner_ = createUsbVciTransport();
-      return inner_ ? inner_->open(deviceName) : ERR_FAILED;
-    }
-
     const bool explicitSerial = !deviceName.empty() &&
                                 (deviceName.rfind("serial:", 0) == 0 || deviceName[0] == '/');
 

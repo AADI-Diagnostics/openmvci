@@ -101,7 +101,7 @@ ctest --test-dir build -C Release --output-on-failure
 
 Additional options include:
 
-- `--device <selector>`: `loopback`, `vid:pid[:serial]`, `serial:/dev/...`, or `/dev/...`
+- `--device <selector>`: `vid:pid[:serial]`, `serial:/dev/...`, or `/dev/...` (or omit for auto-discovery on supported platforms)
 - `--baud <n>`
 - `--timeout <ms>`
 - `--interval <ms>`
@@ -121,7 +121,6 @@ build/dtc_reader --read --device serial:/dev/cu.usbserial-FTXYZ123
 By default, read and monitor modes also attempt VIN retrieval over UDS `0x22 F1 90` and then fall back to OBD Mode 09 PID 02 when needed, printing the decoded VIN before DTC output.
 
 The `read_dtcs` example now defaults to automatic real-device discovery (same behavior as `dtc_reader`).
-Use `./read_dtcs loopback` only for simulated transport testing.
 
 On macOS, automatic serial discovery probes both `/dev/tty.usb*` and `/dev/cu.usb*` nodes.
 

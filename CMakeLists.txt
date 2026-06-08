@@ -20,7 +20,6 @@ add_library(openmvci
   src/packet.cpp
   src/uds.cpp
   src/platform/usb_vci.cpp
-  src/platform/loopback_transport.cpp
 )
 
 if(APPLE)

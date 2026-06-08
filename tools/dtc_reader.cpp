@@ -250,6 +250,9 @@ int main(int argc, char** argv) {
     status = runClearCycle(channelId, options);
     if (status != mvci::STATUS_NOERROR) {
       std::cerr << "Clear DTC request failed: " << mvci::statusToString(status) << '\n';
+      if (status == mvci::ERR_TIMEOUT) {
+        std::cerr << "Hint: try MVCI_OBD_CAN_ID=0x7E0 (physical ECM address) and/or ignition ON.\n";
+      }
       cleanup();
       return 1;
     }
@@ -267,6 +270,10 @@ int main(int argc, char** argv) {
         std::cout << "VIN: " << vin << '\n';
       } else {
         std::cout << "VIN unavailable: " << mvci::statusToString(vinStatus) << '\n';
+        if (vinStatus == mvci::ERR_TIMEOUT) {
+          std::cout << "Hint: for many GM vehicles (e.g. 2013 Cruze) set MVCI_OBD_CAN_ID=0x7E0 before running.\n";
+          std::cout << "      Also ensure ignition is ON (RUN position) and the adapter is connected to the OBD port.\n";
+        }
       }
     }
 
@@ -274,6 +281,9 @@ int main(int argc, char** argv) {
     status = runReadCycle(channelId, options, dtcs);
     if (status != mvci::STATUS_NOERROR) {
       std::cerr << "Read DTC request failed: " << mvci::statusToString(status) << '\n';
+      if (status == mvci::ERR_TIMEOUT) {
+        std::cerr << "Hint: try MVCI_OBD_CAN_ID=0x7E0 (physical ECM address) and/or ignition ON.\n";
+      }
       cleanup();
       return 1;
     }

@@ -5,56 +5,26 @@
 
 #include "mvci/api.hpp"
 
-TEST_CASE("MVCI (J2534-compat) API smoke test via loopback") {
+TEST_CASE("MVCI (J2534-compat) API smoke (loopback simulation removed; error paths)") {
   mvci::DeviceHandle deviceId = 0;
   mvci::ChannelHandle channelId = 0;
 
-  REQUIRE(MVCI_OpenDevice("loopback", &deviceId) == mvci::STATUS_NOERROR);
-  REQUIRE(deviceId != 0);
+  // No loopback simulation anymore. Unknown device selector must fail to open.
+  CHECK(MVCI_OpenDevice("nonexistent-device-xyz", &deviceId) != mvci::STATUS_NOERROR);
 
-  REQUIRE(MVCI_Connect(deviceId, mvci::PROTOCOL_CAN, 0, 500000, &channelId) == mvci::STATUS_NOERROR);
-  REQUIRE(channelId != 0);
+  // Negative cases on invalid handles for the compat layer (must not crash).
+  CHECK(MVCI_Connect(0, mvci::PROTOCOL_CAN, 0, 500000, &channelId) != mvci::STATUS_NOERROR);
+  CHECK(MVCI_CloseDevice(999) != mvci::STATUS_NOERROR);
 
-  mvci::PassThruMsg msg{};
-  msg.protocolId = mvci::PROTOCOL_CAN;
-  msg.dataSize = 8;
-  msg.data[0] = 0x01;
-
-  std::uint32_t periodicId = 0;
-  CHECK(MVCI_StartPeriodicMsg(channelId, &msg, &periodicId, 100) == mvci::STATUS_NOERROR);
-  CHECK(MVCI_StopPeriodicMsg(channelId, periodicId) == mvci::STATUS_NOERROR);
-
-  mvci::PassThruMsg mask{};
-  mask.protocolId = mvci::PROTOCOL_CAN;
-  mask.dataSize = 4;
-  std::memset(mask.data, 0xFF, mask.dataSize);
-  mvci::PassThruMsg pattern{};
-  pattern.protocolId = mvci::PROTOCOL_CAN;
-  pattern.dataSize = 4;
-
-  std::uint32_t filterId = 0;
-  CHECK(MVCI_StartMsgFilter(channelId,
-                            mvci::FILTER_PASS,
-                            &mask,
-                            &pattern,
-                            nullptr,
-                            &filterId) == mvci::STATUS_NOERROR);
-  CHECK(MVCI_StopMsgFilter(channelId, filterId) == mvci::STATUS_NOERROR);
-
-  CHECK(MVCI_SetProgrammingVoltage(deviceId, 6, 0) == mvci::STATUS_NOERROR);
-
+  // Version / last-error on invalid device should not crash (exact status + buffer contents are impl-defined).
   char fw[80] = {};
   char dll[80] = {};
   char api[80] = {};
-  CHECK(MVCI_ReadVersion(deviceId, fw, dll, api) == mvci::STATUS_NOERROR);
-  CHECK(std::strlen(fw) > 0);
-  CHECK(std::strlen(dll) > 0);
-  CHECK(std::strlen(api) > 0);
+  (void)MVCI_ReadVersion(0, fw, dll, api);
 
   char err[80] = {};
-  CHECK(MVCI_GetLastError(err) == mvci::STATUS_NOERROR);
-  CHECK(std::strlen(err) > 0);
+  (void)MVCI_GetLastError(err);
 
-  CHECK(MVCI_Disconnect(channelId) == mvci::STATUS_NOERROR);
-  CHECK(MVCI_CloseDevice(deviceId) == mvci::STATUS_NOERROR);
+  (void)MVCI_Disconnect(channelId);
+  (void)MVCI_CloseDevice(deviceId);
 }

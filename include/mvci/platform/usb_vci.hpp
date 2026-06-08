@@ -38,7 +38,6 @@ private:
     std::uint8_t altSetting{0};
   };
 
-  Status openLoopback();
   Status openUsb(const std::string& deviceName);
   Status discoverDevice(std::uint16_t vid, std::uint16_t pid, const std::string& serial);
   Status discoverAnyMatchingDevice();
@@ -65,8 +64,6 @@ private:
   bool miniVciMode_{false};
   bool miniVciReady_{false};
   int activeConfiguration_{-1};
-  bool loopbackMode_{false};
-  std::unique_ptr<ITransport> loopback_;
   std::vector<std::uint8_t> rxBuffer_;
 };
 

@@ -140,10 +140,6 @@ bool UsbVciInterface::parseDeviceString(const std::string& deviceName,
     return false;
   }
 
-  if (deviceName == "loopback") {
-    return false;
-  }
-
   const auto firstSep = deviceName.find(':');
   if (firstSep == std::string::npos) {
     return false;
@@ -179,17 +175,7 @@ bool UsbVciInterface::miniBootstrapEnabled() {
 Status UsbVciInterface::open(const std::string& deviceName) {
   close();
 
-  if (deviceName == "loopback") {
-    return openLoopback();
-  }
-
   return openUsb(deviceName);
-}
-
-Status UsbVciInterface::openLoopback() {
-  loopbackMode_ = true;
-  loopback_ = createLoopbackTransport();
-  return loopback_ ? loopback_->open("loopback") : ERR_FAILED;
 }
 
 Status UsbVciInterface::openUsb(const std::string& deviceName) {
@@ -397,10 +383,6 @@ Status UsbVciInterface::findEndpoints() {
 }
 
 Status UsbVciInterface::claimInterface() {
-  if (loopbackMode_) {
-    return STATUS_NOERROR;
-  }
-
   if (!handle_) {
     return ERR_FAILED;
   }
@@ -618,7 +600,7 @@ Status UsbVciInterface::initializeMiniVci() {
 }
 
 Status UsbVciInterface::flushInput() {
-  if (loopbackMode_ || !handle_) {
+  if (!handle_) {
     return STATUS_NOERROR;
   }
 
@@ -646,11 +628,6 @@ Status UsbVciInterface::recoverEndpoint(std::uint8_t endpointAddress) {
 }
 
 void UsbVciInterface::close() {
-  if (loopback_) {
-    loopback_->close();
-    loopback_.reset();
-  }
-
   if (handle_) {
     libusb_release_interface(handle_, endpoints_.interfaceNumber);
     libusb_close(handle_);
@@ -669,14 +646,9 @@ void UsbVciInterface::close() {
   miniVciMode_ = false;
   miniVciReady_ = false;
   activeConfiguration_ = -1;
-  loopbackMode_ = false;
 }
 
 Status UsbVciInterface::write(const std::vector<std::uint8_t>& packet) {
-  if (loopback_) {
-    return loopback_->write(packet);
-  }
-
   if (!handle_ || endpoints_.out == 0) {
     return ERR_NOT_INITIALIZED;
   }
@@ -692,10 +664,6 @@ Status UsbVciInterface::write(const std::vector<std::uint8_t>& packet) {
 }
 
 Status UsbVciInterface::read(std::vector<std::uint8_t>& packet, std::uint32_t timeoutMs) {
-  if (loopback_) {
-    return loopback_->read(packet, timeoutMs);
-  }
-
   if (!handle_ || endpoints_.in == 0) {
     return ERR_NOT_INITIALIZED;
   }
@@ -724,10 +692,6 @@ Status UsbVciInterface::controlTransfer(std::uint8_t requestType,
                                         std::uint16_t index,
                                         std::vector<std::uint8_t>& data,
                                         std::uint32_t timeoutMs) {
-  if (loopback_) {
-    return loopback_->controlTransfer(requestType, request, value, index, data, timeoutMs);
-  }
-
   if (!handle_) {
     return ERR_NOT_INITIALIZED;
   }
@@ -755,19 +719,11 @@ Status UsbVciInterface::controlTransfer(std::uint8_t requestType,
 }
 
 void UsbVciInterface::clearRx() {
-  if (loopback_) {
-    loopback_->clearRx();
-    return;
-  }
   rxBuffer_.clear();
   (void)flushInput();
 }
 
 void UsbVciInterface::clearTx() {
-  if (loopback_) {
-    loopback_->clearTx();
-    return;
-  }
 }
 
 std::unique_ptr<ITransport> createUsbVciTransport() {

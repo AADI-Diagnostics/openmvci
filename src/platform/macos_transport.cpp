@@ -33,6 +33,12 @@ void macLog(const char* msg) {
   std::fprintf(stderr, "[mvci macos] %s\n", msg);
 }
 
+// Always emit discovery progress so users running read_dtcs (or other tools)
+// can see which serial node was selected without having to enable verbose.
+void macDiscoveryLog(const char* msg) {
+  std::fprintf(stderr, "[mvci macos] %s\n", msg);
+}
+
 // macOS does not expose /dev/{cu,tty}.usb* via readdir("/dev") -- those
 // nodes are created dynamically by IOKit and only show up via stat(). The
 // portable way to enumerate them is to query the IORegistry for matching
@@ -86,11 +92,6 @@ public:
   Status open(const std::string& deviceName) override {
     close();
 
-    if (deviceName == "loopback") {
-      inner_ = createUsbVciTransport();
-      return inner_ ? inner_->open(deviceName) : ERR_FAILED;
-    }
-
     const bool explicitSerial = !deviceName.empty() &&
                                 (deviceName.rfind("serial:", 0) == 0 || deviceName[0] == '/');
 
@@ -102,14 +103,16 @@ public:
     if (deviceName.empty()) {
       const auto nodes = findUsbSerialNodes();
       for (const auto& node : nodes) {
-        macLog(("trying serial node " + node).c_str());
+        macDiscoveryLog(("trying serial node " + node).c_str());
         auto serial = createSerialTransport();
         if (serial && serial->open(node) == STATUS_NOERROR) {
+          macDiscoveryLog(("selected serial node " + node).c_str());
           inner_ = std::move(serial);
           return STATUS_NOERROR;
         }
+        macDiscoveryLog(("serial node open failed: " + node).c_str());
       }
-      macLog("no usable /dev/{tty,cu}.usb{serial,modem}-* node; falling back to libusb path");
+      macDiscoveryLog("no usable /dev/{tty,cu}.usb{serial,modem}-* node; falling back to libusb path");
     }
 
     inner_ = createUsbVciTransport();

@@ -70,6 +70,22 @@ void slog(const char* msg) {
   std::fprintf(stderr, "[mvci serial] %s\n", msg);
 }
 
+// Always-on info logging for key lifecycle (bootstrap complete) and protocol
+// events (MVCI-framed J2534 data writes/reads for ISO15765 etc.). This is
+// intentionally *not* gated so that `./read_dtcs` (and similar) show what is
+// happening against real hardware. Verbose-only logs (full hex dumps, most
+// bootstrap steps) remain behind MVCI_VERBOSE_SERIAL.
+template <typename... Args>
+void serialInfo(const char* fmt, Args... args) {
+  std::fprintf(stderr, "[mvci serial] ");
+  std::fprintf(stderr, fmt, args...);
+  std::fputc('\n', stderr);
+}
+
+void serialInfo(const char* msg) {
+  std::fprintf(stderr, "[mvci serial] %s\n", msg);
+}
+
 speed_t standardBaud(unsigned int rate) {
   switch (rate) {
     case 9600:   return B9600;
@@ -504,12 +520,80 @@ public:
       slog("icvm write bootstrap completed");
     }
 
-    if (miniReady_ && icvm) {
+    if (miniReady_) {
+      // Refresh the Mini-VCI session/keepalive bridge before *any* post-bootstrap
+      // traffic (both the special ICVM control packets and regular MVCI-framed
+      // J2534 data such as ISO15765 writes). Some clones appear to need recent
+      // keepalives for subsequent CAN commands to be accepted.
       if (boolEnv("MVCI_MINIVCI_SESSION_TICKLE", true)) {
         (void)sendSessionTickle();
       }
       if (boolEnv("MVCI_MINIVCI_KEEPALIVE_BRIDGE", true)) {
         (void)sendKeepalive();
+      }
+    }
+
+    if (packet.size() >= 4) {
+      const bool isMvci = (packet[0] == 0x4D && packet[1] == 0x56 && packet[2] == 0x43 && packet[3] == 0x49);
+      if (isMvci && packet.size() >= 24) {
+        const auto ch = static_cast<unsigned>(packet[4]) |
+                        (static_cast<unsigned>(packet[5]) << 8) |
+                        (static_cast<unsigned>(packet[6]) << 16) |
+                        (static_cast<unsigned>(packet[7]) << 24);
+        const auto proto = static_cast<unsigned>(packet[8]) |
+                           (static_cast<unsigned>(packet[9]) << 8) |
+                           (static_cast<unsigned>(packet[10]) << 16) |
+                           (static_cast<unsigned>(packet[11]) << 24);
+        const auto flags = static_cast<unsigned>(packet[12]) |
+                           (static_cast<unsigned>(packet[13]) << 8) |
+                           (static_cast<unsigned>(packet[14]) << 16) |
+                           (static_cast<unsigned>(packet[15]) << 24);
+        const auto psz = static_cast<unsigned>(packet[20]) |
+                         (static_cast<unsigned>(packet[21]) << 8) |
+                         (static_cast<unsigned>(packet[22]) << 16) |
+                         (static_cast<unsigned>(packet[23]) << 24);
+        serialInfo("MVCI write ch=%u proto=%u flags=0x%08x psz=%u firstData=%02x",
+                   ch, proto, flags, psz, (packet.size() > 24 ? packet[24] : 0));
+      } else if (icvm) {
+        // ICVM data/command carrying a (usually CAN) frame toward the vehicle.
+        // Observed layout for data writes: [0..3]=ICVM magic, later a length field
+        // followed by 4-byte CAN ID (big-endian as produced by withCanIdPrefix) then
+        // the UDS/ISO-TP payload. We make a best-effort decode so that UDS requests
+        // (VIN/DTC) are visible at the unconditional [mvci serial] level.
+        std::uint32_t maybeId = 0;
+        std::size_t payloadOff = 0;
+        if (packet.size() > 32) {
+          // Common observed offset after the variable header + 08 00 00 00 length word.
+          maybeId = (static_cast<std::uint32_t>(packet[28]) << 0) |
+                    (static_cast<std::uint32_t>(packet[29]) << 8) |
+                    (static_cast<std::uint32_t>(packet[30]) << 16) |
+                    (static_cast<std::uint32_t>(packet[31]) << 24);
+          payloadOff = 32;
+        }
+        if (maybeId == 0U) {
+          // Fallback: hunt for 00 00 07 xx (typical 11-bit OBD ID with our prefix style).
+          for (std::size_t i = 4; i + 4 < packet.size(); ++i) {
+            if (packet[i] == 0U && packet[i + 1] == 0U && (packet[i + 2] & 0xF8U) == 0x07U) {
+              maybeId = (static_cast<std::uint32_t>(packet[i + 2]) << 0) |
+                        (static_cast<std::uint32_t>(packet[i + 3]) << 8);
+              payloadOff = i + 4;
+              break;
+            }
+          }
+        }
+        if (maybeId != 0U) {
+          char first[48] = {};
+          std::snprintf(first, sizeof(first), "%02x %02x %02x %02x",
+                        (payloadOff + 0 < packet.size() ? packet[payloadOff + 0] : 0),
+                        (payloadOff + 1 < packet.size() ? packet[payloadOff + 1] : 0),
+                        (payloadOff + 2 < packet.size() ? packet[payloadOff + 2] : 0),
+                        (payloadOff + 3 < packet.size() ? packet[payloadOff + 3] : 0));
+          serialInfo("ICVM data write id=0x%03x first=[%s]", static_cast<unsigned>(maybeId), first);
+        } else if (verbose()) {
+          slog("ICVM write (no CAN id decoded) %zu bytes", packet.size());
+        }
+      } else if (!icvm && verbose()) {
+        slog("write non-ICVM/non-MVCI packet (%zu bytes) first=%02x", packet.size(), packet[0]);
       }
     }
 
@@ -526,6 +610,29 @@ public:
 
     for (;;) {
       if (tryExtractMvcIFrame(rxBuffer_, packet)) {
+        if (packet.size() >= 24) {
+          const bool isMvci = (packet[0] == 0x4D && packet[1] == 0x56 && packet[2] == 0x43 && packet[3] == 0x49);
+          if (isMvci) {
+            const auto ch = static_cast<unsigned>(packet[4]) |
+                            (static_cast<unsigned>(packet[5]) << 8) |
+                            (static_cast<unsigned>(packet[6]) << 16) |
+                            (static_cast<unsigned>(packet[7]) << 24);
+            const auto proto = static_cast<unsigned>(packet[8]) |
+                               (static_cast<unsigned>(packet[9]) << 8) |
+                               (static_cast<unsigned>(packet[10]) << 16) |
+                               (static_cast<unsigned>(packet[11]) << 24);
+            const auto psz = static_cast<unsigned>(packet[20]) |
+                             (static_cast<unsigned>(packet[21]) << 8) |
+                             (static_cast<unsigned>(packet[22]) << 16) |
+                             (static_cast<unsigned>(packet[23]) << 24);
+            const unsigned first = (packet.size() > 24 ? packet[24] : 0);
+            serialInfo("MVCI read ch=%u proto=%u psz=%u firstData=%02x (rxbuf left=%zu)",
+                       ch, proto, psz, first, rxBuffer_.size());
+          }
+        }
+        if (verbose() && packet.size() >= 24) {
+          // verbose may add more context; the summary is already emitted above
+        }
         return STATUS_NOERROR;
       }
       const auto now = std::chrono::steady_clock::now();
@@ -541,8 +648,8 @@ public:
           maybeTickleSession();
         }
         if (std::chrono::steady_clock::now() >= deadline) {
-          slog("read timeout after %u ms (rx_buffer=%zu, mini_ready=%d)",
-               timeoutMs, rxBuffer_.size(), miniReady_ ? 1 : 0);
+          serialInfo("read timeout after %u ms (rx_buffer=%zu, mini_ready=%d)",
+                     timeoutMs, rxBuffer_.size(), miniReady_ ? 1 : 0);
           return ERR_TIMEOUT;
         }
         continue;
@@ -801,6 +908,7 @@ private:
       miniReady_ = true;
       nextTickleAt_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(220);
       slog("mini bootstrap completed (attempt %d)", attempt);
+      serialInfo("mini bootstrap completed (attempt %d)", attempt);
       return STATUS_NOERROR;
     }
     return ERR_FAILED;

@@ -27,7 +27,6 @@ public:
   virtual void clearTx() = 0;
 };
 
-std::unique_ptr<ITransport> createLoopbackTransport();
 std::unique_ptr<ITransport> createPlatformTransport();
 
 } // namespace mvci

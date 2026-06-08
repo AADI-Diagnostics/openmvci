@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <iomanip>
 #include <map>
@@ -12,6 +13,20 @@
 
 namespace mvci {
 namespace {
+
+// Always-on logging for the UDS/OBD request path (VIN, DTCs). Visible on
+// plain `./read_dtcs` runs so users (and developers) can see the high-level
+// requests and response counts without MVCI_VERBOSE_*.
+template <typename... Args>
+void udsInfo(const char* fmt, Args... args) {
+  std::fprintf(stderr, "[mvci uds] ");
+  std::fprintf(stderr, fmt, args...);
+  std::fputc('\n', stderr);
+}
+
+void udsInfo(const char* msg) {
+  std::fprintf(stderr, "[mvci uds] %s\n", msg);
+}
 
 constexpr std::uint32_t kObdBroadcastCanId = 0x000007DFU;
 constexpr std::size_t kCanIdPrefixLen = 4U;
@@ -66,8 +81,9 @@ std::uint32_t readDtcCode(const std::uint8_t* data) {
          static_cast<std::uint32_t>(data[2]);
 }
 
-Status writeSingleFrame(ChannelHandle channelId, const std::vector<std::uint8_t>& request) {
-  const auto framed = withCanIdPrefix(request);
+Status writeSingleFrame(ChannelHandle channelId, const std::vector<std::uint8_t>& request, std::uint32_t canIdOverride) {
+  const auto canId = (canIdOverride != 0U) ? canIdOverride : resolveRequestCanId();
+  const auto framed = withCanIdPrefix(request, canId);
   PassThruMsg msg{};
   msg.protocolId = PROTOCOL_ISO15765;
   msg.txFlags = ISO15765_FRAME_PAD;
@@ -151,10 +167,37 @@ std::vector<std::uint8_t> buildReadVinOBDRequest() {
   return {0x09U, 0x02U};
 }
 
-Status sendUdsRequest(ChannelHandle channelId,
-                      const std::vector<std::uint8_t>& request,
-                      std::vector<std::vector<std::uint8_t>>& responses,
-                      std::uint32_t timeoutMs) {
+// Forward declaration so the session helper (placed early for readability) can
+// call the internal WithId sender before its definition appears in this TU.
+static Status sendUdsRequestWithId(ChannelHandle channelId,
+                                   const std::vector<std::uint8_t>& request,
+                                   std::vector<std::vector<std::uint8_t>>& responses,
+                                   std::uint32_t timeoutMs,
+                                   std::uint32_t canIdOverride);
+
+// Best-effort attempt to enter a default diagnostic session (e.g. extended 0x03).
+// Many ECUs and gateways require an active session before UDS DID reads (22 F190)
+// or DTC retrieval (19 02) are permitted; others will respond to data requests
+// without it. We fire the request with a short timeout and ignore the result so
+// that higher-level VIN/DTC code can proceed unconditionally.
+static Status tryEnterDefaultDiagnosticSession(ChannelHandle channelId,
+                                               std::uint32_t shortTimeoutMs) {
+  const std::vector<std::uint8_t> req{0x10U, 0x03U};
+  std::vector<std::vector<std::uint8_t>> replies;
+  (void)sendUdsRequestWithId(channelId, req, replies, shortTimeoutMs, /*canIdOverride*/ 0U);
+  // Swallow any status; a 50 03 positive, 7F 10 xx negative, or even a pure timeout
+  // are all acceptable here — we just want to have "woken" the session state if needed.
+  return STATUS_NOERROR;
+}
+
+// Internal implementation supporting a one-shot CAN ID override for this request
+// (enables automatic fallback from 7DF functional to 7E0 physical for ECUs/gateways
+// that ignore broadcast, without affecting other callers or requiring env changes).
+static Status sendUdsRequestWithId(ChannelHandle channelId,
+                                   const std::vector<std::uint8_t>& request,
+                                   std::vector<std::vector<std::uint8_t>>& responses,
+                                   std::uint32_t timeoutMs,
+                                   std::uint32_t canIdOverride /* 0 = resolveRequestCanId() */) {
   responses.clear();
 
   if (request.empty()) {
@@ -163,8 +206,20 @@ Status sendUdsRequest(ChannelHandle channelId,
 
   ensureObdFlowControlFilters(channelId);
 
-  const auto writeStatus = writeSingleFrame(channelId, request);
+  const auto canId = (canIdOverride != 0U) ? canIdOverride : resolveRequestCanId();
+  {
+    std::string reqHex;
+    for (auto b : request) {
+      char buf[4];
+      std::snprintf(buf, sizeof(buf), "%02X ", b);
+      reqHex += buf;
+    }
+    udsInfo("send ch=%u canId=0x%08X req=[%s] timeout=%ums", channelId, canId, reqHex.c_str(), timeoutMs);
+  }
+
+  const auto writeStatus = writeSingleFrame(channelId, request, canIdOverride);
   if (writeStatus != STATUS_NOERROR) {
+    udsInfo("writeSingleFrame failed: %d", static_cast<int>(writeStatus));
     return writeStatus;
   }
 
@@ -193,7 +248,16 @@ Status sendUdsRequest(ChannelHandle channelId,
     }
   }
 
+  udsInfo("received %zu response frame(s); status=%s", responses.size(),
+          responses.empty() ? "ERR_TIMEOUT" : "OK");
   return responses.empty() ? ERR_TIMEOUT : STATUS_NOERROR;
+}
+
+Status sendUdsRequest(ChannelHandle channelId,
+                      const std::vector<std::uint8_t>& request,
+                      std::vector<std::vector<std::uint8_t>>& responses,
+                      std::uint32_t timeoutMs) {
+  return sendUdsRequestWithId(channelId, request, responses, timeoutMs, /*override*/ 0U);
 }
 
 Status parseActiveDtcResponses(const std::vector<std::vector<std::uint8_t>>& responses,
@@ -234,14 +298,34 @@ Status readActiveDtcs(ChannelHandle channelId,
                       std::vector<DtcRecord>& dtcs,
                       std::uint32_t timeoutMs,
                       std::uint8_t statusMask) {
+  (void)tryEnterDefaultDiagnosticSession(channelId, std::min<std::uint32_t>(timeoutMs, 1200U));
+
   const auto request = buildReadDtcRequest(statusMask);
+  const auto primaryId = resolveRequestCanId();
+
   std::vector<std::vector<std::uint8_t>> responses;
-  const auto status = sendUdsRequest(channelId, request, responses, timeoutMs);
-  if (status != STATUS_NOERROR) {
-    return status;
+  auto status = sendUdsRequestWithId(channelId, request, responses, timeoutMs, primaryId);
+  if (status == STATUS_NOERROR) {
+    status = parseActiveDtcResponses(responses, dtcs, statusMask);
+    if (status == STATUS_NOERROR || !responses.empty()) {
+      return status;
+    }
   }
 
-  return parseActiveDtcResponses(responses, dtcs, statusMask);
+  // Broadcast produced no frames at all — retry with physical addressing (GM ECMs etc.).
+  if (responses.empty() && primaryId == kObdBroadcastCanId) {
+    udsInfo("DTC read no response on broadcast; retrying with physical 0x7E0");
+    responses.clear();
+    status = sendUdsRequestWithId(channelId, request, responses, timeoutMs, 0x000007E0U);
+    if (status == STATUS_NOERROR) {
+      status = parseActiveDtcResponses(responses, dtcs, statusMask);
+      if (status == STATUS_NOERROR || !responses.empty()) {
+        return status;
+      }
+    }
+  }
+
+  return status;
 }
 
 Status parseVinResponses(const std::vector<std::vector<std::uint8_t>>& responses,
@@ -320,27 +404,67 @@ Status parseOBDVinResponses(const std::vector<std::vector<std::uint8_t>>& respon
 Status readVehicleVin(ChannelHandle channelId,
                       std::string& vin,
                       std::uint32_t timeoutMs) {
-  const auto udsRequest = buildReadVinRequest();
-  std::vector<std::vector<std::uint8_t>> responses;
-  auto status = sendUdsRequest(channelId, udsRequest, responses, timeoutMs);
-  if (status == STATUS_NOERROR) {
-    status = parseVinResponses(responses, vin);
+  (void)tryEnterDefaultDiagnosticSession(channelId, std::min<std::uint32_t>(timeoutMs, 1200U));
+
+  const auto primaryId = resolveRequestCanId();
+
+  // Try UDS VIN DID (22 F190) first with the configured (or default broadcast) ID.
+  {
+    const auto udsRequest = buildReadVinRequest();
+    std::vector<std::vector<std::uint8_t>> responses;
+    auto status = sendUdsRequestWithId(channelId, udsRequest, responses, timeoutMs, primaryId);
     if (status == STATUS_NOERROR) {
-      return STATUS_NOERROR;
+      status = parseVinResponses(responses, vin);
+      if (status == STATUS_NOERROR) {
+        return STATUS_NOERROR;
+      }
+    }
+
+    // If the vehicle/gateway ignored the functional broadcast (common on GM),
+    // retry the exact same UDS request using physical addressing to the ECM (7E0 -> 7E8).
+    if (responses.empty() && primaryId == kObdBroadcastCanId) {
+      udsInfo("VIN UDS no response on broadcast; retrying with physical 0x7E0");
+      responses.clear();
+      status = sendUdsRequestWithId(channelId, udsRequest, responses, timeoutMs, 0x000007E0U);
+      if (status == STATUS_NOERROR) {
+        status = parseVinResponses(responses, vin);
+        if (status == STATUS_NOERROR) {
+          return STATUS_NOERROR;
+        }
+      }
     }
   }
 
-  const auto obdRequest = buildReadVinOBDRequest();
-  responses.clear();
-  status = sendUdsRequest(channelId, obdRequest, responses, timeoutMs);
-  if (status != STATUS_NOERROR) {
+  // OBD mode 09 02 fallback (also try physical on broadcast miss).
+  {
+    const auto obdRequest = buildReadVinOBDRequest();
+    std::vector<std::vector<std::uint8_t>> responses;
+    auto status = sendUdsRequestWithId(channelId, obdRequest, responses, timeoutMs, primaryId);
+    if (status == STATUS_NOERROR) {
+      status = parseOBDVinResponses(responses, vin);
+      if (status == STATUS_NOERROR) {
+        return STATUS_NOERROR;
+      }
+    }
+
+    if (responses.empty() && primaryId == kObdBroadcastCanId) {
+      udsInfo("VIN OBD no response on broadcast; retrying with physical 0x7E0");
+      responses.clear();
+      status = sendUdsRequestWithId(channelId, obdRequest, responses, timeoutMs, 0x000007E0U);
+      if (status == STATUS_NOERROR) {
+        status = parseOBDVinResponses(responses, vin);
+        if (status == STATUS_NOERROR) {
+          return STATUS_NOERROR;
+        }
+      }
+    }
     return status;
   }
-
-  return parseOBDVinResponses(responses, vin);
 }
 
 Status clearDtcs(ChannelHandle channelId, std::uint32_t timeoutMs) {
+  (void)tryEnterDefaultDiagnosticSession(channelId, std::min<std::uint32_t>(timeoutMs, 1200U));
+
   const auto request = buildClearDtcRequest();
   std::vector<std::vector<std::uint8_t>> responses;
   const auto status = sendUdsRequest(channelId, request, responses, timeoutMs);
