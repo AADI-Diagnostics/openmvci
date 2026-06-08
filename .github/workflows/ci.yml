@@ -75,7 +75,7 @@ jobs:
 
       - name: Install to staging directory (for artifacts)
         shell: bash
-        run: cmake --install build-package --prefix ${{ github.workspace }}/package
+        run: cmake --install build-package --config ${{ matrix.build_type }} --prefix package
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
