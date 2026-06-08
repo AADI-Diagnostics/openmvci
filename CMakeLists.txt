@@ -21,7 +21,6 @@ add_library(openmvci
   src/uds.cpp
   src/platform/usb_vci.cpp
   src/platform/loopback_transport.cpp
-  src/platform/serial_transport.cpp
 )
 
 if(APPLE)
@@ -34,6 +33,10 @@ elseif(WIN32)
   target_sources(openmvci PRIVATE src/platform/windows_transport.cpp)
 else()
   target_sources(openmvci PRIVATE src/platform/linux_transport.cpp)
+endif()
+
+if(NOT WIN32)
+  target_sources(openmvci PRIVATE src/platform/serial_transport.cpp)
 endif()
 
 target_include_directories(openmvci
