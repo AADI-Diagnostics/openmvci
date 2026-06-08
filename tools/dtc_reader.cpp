@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <chrono>
+#include <iomanip>
 #include <iostream>
 #include <thread>
 #include <string>
@@ -113,6 +114,10 @@ void printDtcs(const std::vector<mvci::DtcRecord>& dtcs) {
   }
 
   for (const auto& dtc : dtcs) {
+    if (dtc.ecuAddress != 0U) {
+      std::cout << "ECU 0x" << std::hex << std::uppercase << std::setw(3) << std::setfill('0')
+                << dtc.ecuAddress << std::dec << std::setfill(' ') << " ";
+    }
     std::cout << mvci::formatDtc(dtc.code)
               << " status=0x"
               << std::hex
@@ -190,10 +195,11 @@ mvci::Status runClearCycle(mvci::ChannelHandle channelId, const Options& options
   }
 
   for (const auto& response : responses) {
-    if (!response.empty() && response.front() == 0x54U) {
+    const auto uds = mvci::stripCanIdPrefix(response);
+    if (!uds.empty() && uds.front() == 0x54U) {
       return mvci::STATUS_NOERROR;
     }
-    if (!response.empty() && response.front() == 0x7FU) {
+    if (!uds.empty() && uds.front() == 0x7FU) {
       return mvci::ERR_FAILED;
     }
   }

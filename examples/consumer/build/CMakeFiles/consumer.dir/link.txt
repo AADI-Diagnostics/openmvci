@@ -1,1 +1,0 @@
-/usr/bin/c++  -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/consumer.dir/main.cpp.o -o consumer  /Users/cmarshall/Desktop/reverse_engineering/mvci32_min/build/libMVCI32.a /opt/homebrew/lib/libusb-1.0.dylib

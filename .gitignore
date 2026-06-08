@@ -25,3 +25,7 @@
 *.dmp
 *.wireshark
 *.dump
+
+# Python Cache
+*.pyc
+__pycache__/

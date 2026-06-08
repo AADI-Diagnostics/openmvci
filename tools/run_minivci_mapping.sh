@@ -3,8 +3,8 @@ set -euo pipefail
 set +x
 
 NODE="${1:-/dev/cu.usbserial-A6RUMHAY}"
-PCAP="${2:-/Users/cmarshall/Downloads/usb-msvc32.pcapng}"
-BUILD_DIR="${3:-/Users/cmarshall/Desktop/openmvci/build}"
+PCAP="${2:-${HOME}/Downloads/usb-msvc32.pcapng}"
+BUILD_DIR="${3:-$(cd "$(dirname "$0")/.. && pwd)/build}"
 ICVM_ATTEMPTS="${MAPPING_ICVM_ATTEMPTS:-5}"
 
 wait_for_node() {

@@ -39,11 +39,21 @@ std::vector<std::uint8_t> withCanIdPrefix(const std::vector<std::uint8_t>& paylo
   return wrapped;
 }
 
-std::vector<std::uint8_t> stripCanIdPrefix(const std::vector<std::uint8_t>& frame) {
-  if (frame.size() <= kCanIdPrefixLen) {
-    return frame;
+std::uint32_t extractCanId(const std::vector<std::uint8_t>& frame) {
+  if (frame.size() < kCanIdPrefixLen) {
+    return 0U;
   }
-  return std::vector<std::uint8_t>(frame.begin() + kCanIdPrefixLen, frame.end());
+  // Only decode as a CAN ID prefix when the frame looks like our OBD embedding
+  // (11-bit IDs carried as 00 00 07 Ex in big-endian 32-bit word). Bare UDS
+  // payloads (e.g. starting with 0x59/0x49/0x7F from unit tests or direct callers)
+  // must be left alone; their first byte is never 0 in this protocol.
+  if (frame[0] != 0U || frame[1] != 0U) {
+    return 0U;
+  }
+  return (static_cast<std::uint32_t>(frame[0]) << 24U) |
+         (static_cast<std::uint32_t>(frame[1]) << 16U) |
+         (static_cast<std::uint32_t>(frame[2]) << 8U) |
+         static_cast<std::uint32_t>(frame[3]);
 }
 
 bool isPositiveResponse(const std::vector<std::uint8_t>& response, std::uint8_t serviceId) {
@@ -109,6 +119,22 @@ void ensureObdFlowControlFilters(ChannelHandle channelId) {
 
 } // namespace
 
+// Public implementation (definition must be in mvci:: not the anonymous namespace
+// so that it satisfies the declaration in the header and is exported from the library).
+std::vector<std::uint8_t> stripCanIdPrefix(const std::vector<std::uint8_t>& frame) {
+  constexpr std::size_t prefixLen = 4U;
+  if (frame.size() <= prefixLen) {
+    return frame;
+  }
+  // Only strip when the frame looks like it carries our CAN ID prefix (leading
+  // 00 00 for the OBD 11-bit IDs). Otherwise the payload is already a bare UDS
+  // response (as in unit tests and for any callers that invoke the parsers directly).
+  if (frame[0] != 0U || frame[1] != 0U) {
+    return frame;
+  }
+  return std::vector<std::uint8_t>(frame.begin() + prefixLen, frame.end());
+}
+
 std::vector<std::uint8_t> buildReadDtcRequest(std::uint8_t statusMask) {
   return {0x19U, 0x02U, statusMask};
 }
@@ -158,7 +184,10 @@ Status sendUdsRequest(ChannelHandle channelId,
     }
 
     std::vector<std::uint8_t> payload(msg.data, msg.data + msg.dataSize);
-    responses.emplace_back(stripCanIdPrefix(payload));
+    // Keep the raw payload (includes 4-byte CAN ID prefix for RX frames). The prefix
+    // carries the ECU source address (e.g. 0x7E8) so callers and parsers can associate
+    // responses/DTCs with specific ECUs. Parsers below use stripCanIdPrefix as needed.
+    responses.emplace_back(std::move(payload));
     if (remaining == 0U) {
       break;
     }
@@ -173,25 +202,28 @@ Status parseActiveDtcResponses(const std::vector<std::vector<std::uint8_t>>& res
   dtcs.clear();
 
   for (const auto& response : responses) {
-    if (response.size() < 4) {
+    const auto uds = stripCanIdPrefix(response);
+    const std::uint32_t ecu = extractCanId(response);
+
+    if (uds.size() < 4) {
       continue;
     }
 
-    if (response[0] == 0x7FU) {
+    if (uds[0] == 0x7FU) {
       return ERR_FAILED;
     }
 
-    if (!isPositiveResponse(response, 0x19U)) {
+    if (!isPositiveResponse(uds, 0x19U)) {
       continue;
     }
 
-    for (std::size_t index = 3; index + 3 < response.size(); index += 4) {
-      const auto code = readDtcCode(&response[index]);
-      const auto recordStatus = response[index + 3];
+    for (std::size_t index = 3; index + 3 < uds.size(); index += 4) {
+      const auto code = readDtcCode(&uds[index]);
+      const auto recordStatus = uds[index + 3];
       if ((recordStatus & statusMask) == 0U) {
         continue;
       }
-      dtcs.push_back(DtcRecord{code, recordStatus});
+      dtcs.push_back(DtcRecord{code, recordStatus, ecu});
     }
   }
 
@@ -217,20 +249,21 @@ Status parseVinResponses(const std::vector<std::vector<std::uint8_t>>& responses
   vin.clear();
 
   for (const auto& response : responses) {
-    if (response.size() < 4) {
+    const auto uds = stripCanIdPrefix(response);
+    if (uds.size() < 4) {
       continue;
     }
 
-    if (response[0] == 0x7FU) {
+    if (uds[0] == 0x7FU) {
       return ERR_FAILED;
     }
 
-    if (response[0] != 0x62U || response[1] != 0xF1U || response[2] != 0x90U) {
+    if (uds[0] != 0x62U || uds[1] != 0xF1U || uds[2] != 0x90U) {
       continue;
     }
 
-    for (std::size_t i = 3; i < response.size(); ++i) {
-      const auto c = static_cast<char>(response[i]);
+    for (std::size_t i = 3; i < uds.size(); ++i) {
+      const auto c = static_cast<char>(uds[i]);
       if (std::isprint(static_cast<unsigned char>(c)) != 0 && c != '\0') {
         vin.push_back(c);
       }
@@ -247,22 +280,23 @@ Status parseOBDVinResponses(const std::vector<std::vector<std::uint8_t>>& respon
   std::map<std::uint8_t, std::string> orderedFrames;
 
   for (const auto& response : responses) {
-    if (response.size() < 4) {
+    const auto uds = stripCanIdPrefix(response);
+    if (uds.size() < 4) {
       continue;
     }
 
-    if (response[0] == 0x7FU) {
+    if (uds[0] == 0x7FU) {
       return ERR_FAILED;
     }
 
-    if (response[0] != 0x49U || response[1] != 0x02U) {
+    if (uds[0] != 0x49U || uds[1] != 0x02U) {
       continue;
     }
 
-    const std::uint8_t frameIndex = response[2];
+    const std::uint8_t frameIndex = uds[2];
     std::string frameData;
-    for (std::size_t i = 3; i < response.size(); ++i) {
-      const auto c = static_cast<char>(response[i]);
+    for (std::size_t i = 3; i < uds.size(); ++i) {
+      const auto c = static_cast<char>(uds[i]);
       if (std::isprint(static_cast<unsigned char>(c)) != 0 && c != '\0') {
         frameData.push_back(c);
       }
@@ -315,13 +349,14 @@ Status clearDtcs(ChannelHandle channelId, std::uint32_t timeoutMs) {
   }
 
   for (const auto& response : responses) {
-    if (response.empty()) {
+    const auto uds = stripCanIdPrefix(response);
+    if (uds.empty()) {
       continue;
     }
-    if (response[0] == 0x7FU) {
+    if (uds[0] == 0x7FU) {
       return ERR_FAILED;
     }
-    if (response[0] == 0x54U) {
+    if (uds[0] == 0x54U) {
       return STATUS_NOERROR;
     }
   }

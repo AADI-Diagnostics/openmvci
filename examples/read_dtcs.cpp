@@ -1,3 +1,4 @@
+#include <iomanip>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -54,6 +55,14 @@ int main(int argc, char** argv) {
   const auto status = mvci::readActiveDtcs(channelId, dtcs, 1500, 0xFFU);
   if (status == mvci::STATUS_NOERROR) {
     std::cout << "Read " << dtcs.size() << " DTC(s)\n";
+    for (const auto& dtc : dtcs) {
+      if (dtc.ecuAddress != 0U) {
+        std::cout << "  ECU 0x" << std::hex << std::uppercase << std::setw(3) << std::setfill('0')
+                  << dtc.ecuAddress << std::dec << std::setfill(' ') << ": ";
+      }
+      std::cout << mvci::formatDtc(dtc.code)
+                << " status=0x" << std::hex << static_cast<unsigned>(dtc.status) << std::dec << '\n';
+    }
   } else {
     std::cerr << "Read failed: " << mvci::statusToString(status) << '\n';
   }
